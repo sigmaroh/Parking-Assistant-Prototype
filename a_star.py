@@ -183,7 +183,7 @@ def smooth_path_bspline(path: List[Tuple[int, int]], smoothing_factor: float = 0
     smoothed_path = np.column_stack((x_smooth, y_smooth))
     
     return smoothed_path
-def visualize_path(grid: np.ndarray, path: List[Tuple[int, int]], show_smoothed: bool = True):
+def visualize_path(grid: np.ndarray,original_path:List[Tuple[int, int]], path: List[Tuple[int, int]], show_smoothed: bool = True):
     """
     Visualize the grid and found path with optional B-spline smoothing.
     
@@ -192,26 +192,45 @@ def visualize_path(grid: np.ndarray, path: List[Tuple[int, int]], show_smoothed:
         path: List of (x, y) coordinates representing the path
         show_smoothed: Whether to show the smoothed path
     """
-    plt.figure(figsize=(12, 10))
+    plt.figure(figsize=(12, 12))
     plt.imshow(grid, cmap='binary')
-    
+
+    if original_path:
+        opath_array  = np.array(original_path)
+        plt.plot(opath_array[:, 1], opath_array[:, 0], 'r', linewidth=3, alpha=0.8, label='Original Path')
     if path:
         path_array = np.array(path)
         
         # Plot original path in blue
-        plt.plot(path_array[:, 1], path_array[:, 0], 'b-', linewidth=2, alpha=0.7, label='Original Path')
+        plt.plot(path_array[:, 1], path_array[:, 0], 'b-', linewidth=3, alpha=0.8, label='Optimized Path')
         
         # Plot smoothed path if requested
         if show_smoothed and len(path) >= 3:
             try:
-                # Create both basic and obstacle-aware smoothed paths
-                basic_smoothed = smooth_path_bspline(path, smoothing_factor=0.5, num_points=200)
-                
-                plt.plot(basic_smoothed[:, 1], basic_smoothed[:, 0], 'green', linewidth=2, 
-                        alpha=0.6, label='Basic B-spline', linestyle='solid')
-                
+                smoothing_factors = [0.0, 0.1 ,0.5]
+                # colors = cm.viridis(np.linspace(0, 1, len(smoothing_factors)))
+                colors = ['g','c','m']
+
+                for i, factor in enumerate(smoothing_factors):
+                    try:
+                        basic_smoothed = smooth_path_bspline(path, smoothing_factor=factor, num_points=100)
+                        print(f"Smoothing factor {factor:.2f}: {len(basic_smoothed)} points")
+
+                        plt.plot(
+                            basic_smoothed[:, 1],
+                            basic_smoothed[:, 0],
+                            color=colors[i],
+                            linewidth=2,
+                            alpha=0.7,
+                            label=f'Smoothing factor = {factor:.2f}',
+                            linestyle='solid'
+                        )
+                    except Exception as e:
+                        print(f"Smoothing factor {factor}: Error - {e}")
+
             except Exception as e:
-                print(f"Warning: Could not create smoothed path: {e}")
+                print(f"Warning: Could not create smoothed paths: {e}")
+
         
         # Plot start and goal points
         plt.plot(path_array[0, 1], path_array[0, 0], 'go', markersize=12, label='Start', markeredgecolor='darkgreen', markeredgewidth=2)
@@ -237,5 +256,77 @@ def visualize_path(grid: np.ndarray, path: List[Tuple[int, int]], show_smoothed:
                 fontsize=10, verticalalignment='top', 
                 bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.8))
     
+    plt.tight_layout()
+    plt.show()
+
+
+import scipy.ndimage as ndimage
+
+def inflate_obstacles(grid: np.ndarray, clearance: int = 1) -> np.ndarray:
+    """
+    Inflate obstacles in the grid by a given clearance (in cells).
+    
+    Args:
+        grid: Original grid (0 = free, 1 = obstacle)
+        clearance: Radius in grid cells to expand each obstacle
+    
+    Returns:
+        A new grid with inflated obstacles
+    """
+    structure = ndimage.generate_binary_structure(2, 2)  # 8-connectivity
+    inflated_grid = ndimage.binary_dilation(grid, structure=structure, iterations=clearance).astype(np.uint8)
+    return inflated_grid
+
+
+import matplotlib.pyplot as plt
+import matplotlib.cm as cm  # for colormap
+
+def plot_multiple_smoothing_factors(grid: np.ndarray, path: List[Tuple[int, int]], factors: List[float]):
+    """
+    Plot the original path and multiple smoothed versions with varying smoothing factors.
+    
+    Args:
+        grid: 2D grid
+        path: Original A* path
+        factors: List of smoothing factors to test
+    """
+    plt.figure(figsize=(12, 10))
+    plt.imshow(grid, cmap='binary')
+
+    if not path:
+        print("No path to plot.")
+        return
+
+    path_array = np.array(path)
+
+    # Plot original path
+    plt.plot(path_array[:, 1], path_array[:, 0], 'b--', linewidth=2, alpha=0.7, label='Original Path')
+
+    # Color map for different factors
+    colors = cm.viridis(np.linspace(0, 1, len(factors)))
+
+    # Plot each smoothed path
+    for i, factor in enumerate(factors):
+        basic_smoothed = smooth_path_bspline(path, smoothing_factor=factor, num_points=100)
+        print(f"Smoothing factor {factor:.2f}: {len(basic_smoothed)} points")
+
+        plt.plot(
+            basic_smoothed[:, 1],
+            basic_smoothed[:, 0],
+            color=colors[i],
+            linewidth=2,
+            alpha=0.8,
+            label=f'Smoothing factor = {factor:.2f}'
+        )
+
+    # Start and goal markers
+    plt.plot(path_array[0, 1], path_array[0, 0], 'go', markersize=12, label='Start')
+    plt.plot(path_array[-1, 1], path_array[-1, 0], 'ro', markersize=12, label='Goal')
+
+    plt.grid(True, alpha=0.3)
+    plt.legend(fontsize=10, loc='upper right')
+    plt.title("Path with Multiple B-spline Smoothing Factors", fontsize=14)
+    plt.xlabel("Y Coordinate")
+    plt.ylabel("X Coordinate")
     plt.tight_layout()
     plt.show()
