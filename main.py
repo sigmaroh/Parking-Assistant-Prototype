@@ -148,16 +148,16 @@ def detect_parking_lot_features(image_path, grid_width=50, grid_height=30, visua
 
     # Thresholds for geometric features
     # Cars: solid objects with moderate size and relatively compact
-    min_car_area = 1000
-    max_car_area = 8000
-    min_car_aspect_ratio = 1.0
-    max_car_aspect_ratio = 3.5
+    min_car_area = 900
+    max_car_area = 30000
+    min_car_aspect_ratio = 0.7
+    max_car_aspect_ratio = 4.0
 
     # Parking spots: outlined rectangles (larger, detected by edge/contour)
-    min_parking_spot_area = 1500
-    max_parking_spot_area = 15000
-    min_parking_spot_aspect_ratio = 1.5
-    max_parking_spot_aspect_ratio = 5.0
+    min_parking_spot_area = 800
+    max_parking_spot_area = 80000
+    min_parking_spot_aspect_ratio = 0.5
+    max_parking_spot_aspect_ratio = 2.0
 
     # First, use the spot contours derived from the HSV thresholding pass
     for s_cont in spot_contours:
@@ -312,6 +312,7 @@ def detect_parking_lot_features(image_path, grid_width=50, grid_height=30, visua
     # Determine occupancy by overlap ratio between car mask and spot mask
     occupied_spots = set()
     car_assigned = [False] * len(car_masks)
+    spot_overlaps = []
     for si, (s_cont, s_mask, s_area) in enumerate(spot_masks):
         best_overlap = 0.0
         best_ci = None
@@ -322,10 +323,23 @@ def detect_parking_lot_features(image_path, grid_width=50, grid_height=30, visua
             if s_area > 0 and ov / s_area > best_overlap:
                 best_overlap = ov / s_area
                 best_ci = ci
-        # if overlap significant, mark spot occupied
-        if best_overlap > 0.12 and best_ci is not None:
+        spot_overlaps.append((si, best_overlap, best_ci))
+        # if overlap significant, mark spot occupied (lowered threshold to be more sensitive)
+        if best_overlap >= 0.079 and best_ci is not None:
             occupied_spots.add(si)
             car_assigned[best_ci] = True
+            try:
+                print(f"Marked spot {si} occupied (overlap={best_overlap:.6f}, car={best_ci})")
+            except Exception:
+                pass
+
+    # Print per-spot overlap information to help tuning
+    try:
+        print("\nPer-spot overlap ratios (spot_index, overlap_ratio, matched_car_index):")
+        for si, ov, ci in spot_overlaps:
+            print(f"  Spot {si}: overlap={ov:.3f}, car_index={ci}")
+    except Exception:
+        pass
 
     # Map parking spots to grid: occupied -> 1, empty -> 2
     for si, (s_cont, s_mask, s_area) in enumerate(spot_masks):
