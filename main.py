@@ -1,20 +1,15 @@
-"""
-Parking Lot to Grid Converter for A* Pathfinding
-Converts parking lot images to numerical grid for navigation algorithms
-Supports both YOLO and Traditional CV detection methods
-"""
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import cv2
 import numpy as np
 from PIL import Image, ImageTk
-import json
 from heapq import heappush, heappop
 import os
 import threading
 from math import sqrt
 from scipy.interpolate import UnivariateSpline
+
 import scipy.ndimage as ndimage
 
 
@@ -50,6 +45,14 @@ class ParkingGridConverter:
         self.smoothed_path = None
         self.inflated_grid = None
         self.clearance_radius = 1
+        
+        # Simulation
+        self.simulation_running = False
+        self.simulation_index = 0
+        self.simulation_path = None  # The path being simulated
+        self.car_heading = 0  # Car heading angle in degrees
+        self.simulation_window = None  # Fullscreen simulation window
+        self.simulation_canvas = None  # Canvas in fullscreen window
         
         # Create UI first (needed for status updates)
         self.create_widgets()
@@ -126,11 +129,16 @@ class ParkingGridConverter:
             command=self.clear_path
         ).pack(side=tk.LEFT, padx=5)
         
-        ttk.Button(
+        
+        # ttk.Separator(button_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=10)
+        
+        # Simulation controls
+        self.sim_start_btn = ttk.Button(
             button_frame,
-            text="Export Grid",
-            command=self.export_grid
-        ).pack(side=tk.LEFT, padx=5)
+            text="▶ Simulate",
+            command=self.start_simulation
+        )
+        self.sim_start_btn.pack(side=tk.LEFT, padx=5)
         
         # Grid Configuration Frame
         config_frame = ttk.LabelFrame(control_frame, text="Configuration", padding="10")
@@ -186,6 +194,19 @@ class ParkingGridConverter:
         )
         self.cell_size_spinbox.set(10)  # Default cell size in pixels
         self.cell_size_spinbox.pack(side=tk.LEFT, padx=5)
+        
+        ttk.Separator(config_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=10)
+        
+        # Simulation config
+        ttk.Label(config_frame, text="Sim Speed:").pack(side=tk.LEFT, padx=5)
+        self.sim_speed_spinbox = ttk.Spinbox(
+            config_frame,
+            from_=1,
+            to=100,
+            width=6
+        )
+        self.sim_speed_spinbox.set(30)  # Default speed (frames per movement)
+        self.sim_speed_spinbox.pack(side=tk.LEFT, padx=5)
         
         # Legend frame
         legend_frame = ttk.Frame(control_frame)
@@ -254,11 +275,11 @@ class ParkingGridConverter:
                 self.root.after(0, lambda: self.update_status("Loading YOLO model (downloading if first time)..."))
                 from ultralytics import YOLO
                 # Load YOLOv8 model (will download on first use)
-                model_path = 'models/yolo11n.pt'
+                model_path = 'yolov8x-seg.pt'
                 if os.path.exists(model_path):
                     self.yolo_model = YOLO(model_path)
                 else:
-                    self.yolo_model = YOLO('yolov8n.pt')
+                    self.yolo_model = YOLO('yolov8x-seg.pt')
                 self.root.after(0, lambda: self.update_status("YOLO model loaded! Ready to detect obstacles."))
                 self.root.after(0, lambda: self.update_info(
                     "Workflow:\n"
@@ -267,6 +288,7 @@ class ParkingGridConverter:
                     "3. Detect Obstacles (YOLO) → Red\n"
                     "4. Generate Grid\n"
                     "5. Set Start/End → Run A*\n\n"
+                    "6. Simulate \n"
                     "Click '1. Load Image' to begin."
                 ))
             except ImportError as e:
@@ -279,7 +301,7 @@ class ParkingGridConverter:
                 ))
                 print(f"YOLO import error: {e}")
             except Exception as e:
-                error_msg = f"⚠ YOLO load failed. Use Traditional CV instead."
+                error_msg = f"YOLO load failed. Use Traditional CV instead."
                 self.root.after(0, lambda: self.update_status(error_msg))
                 print(f"YOLO load error: {e}")
         
@@ -316,6 +338,9 @@ class ParkingGridConverter:
             self.path = None
             self.smoothed_path = None
             
+            # Reset simulation state
+            self.stop_simulation()
+            
             # Display original image
             display_img = cv2.cvtColor(self.original_image, cv2.COLOR_BGR2RGB)
             self.display_image(display_img, self.image_canvas)
@@ -327,7 +352,7 @@ class ParkingGridConverter:
             expected_cols = img_width // cell_size
             expected_rows = img_height // cell_size
             
-            self.update_status(f"✓ Loaded image: {os.path.basename(file_path)}")
+            self.update_status(f"Loaded image: {os.path.basename(file_path)}")
             self.update_info(f"Image Size: {img_width}x{img_height} pixels\n"
                            f"Cell Size: {cell_size}px → Grid: {expected_cols}x{expected_rows}\n\n"
                            f"Next Step: 2. Detect Parking Spots\n"
@@ -378,6 +403,10 @@ class ParkingGridConverter:
             
             # Step 5: Save dilated
             cv2.imwrite(os.path.join(output_folder, "6_dilated.png"), dilated)
+            
+            # Step 5b: Save binary dilated image (thresholded to pure black/white)
+            _, binary_dilated = cv2.threshold(dilated, 127, 255, cv2.THRESH_BINARY)
+            cv2.imwrite(os.path.join(output_folder, "6b_binary_dilated.png"), binary_dilated)
             
             contours, _ = cv2.findContours(dilated, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
             
@@ -468,7 +497,7 @@ class ParkingGridConverter:
             cv2.imwrite(os.path.join(output_folder, "8_detected_parking_spots.png"), 
                        cv2.cvtColor(result_image, cv2.COLOR_RGB2BGR))
             
-            self.update_status(f"✓ Detected {len(parking_spot_rects)} empty parking spots (images saved to {output_folder}/)")
+            self.update_status(f"Detected {len(parking_spot_rects)} empty parking spots (images saved to {output_folder}/)")
             
             info_text = f"Parking Spot Detection (Traditional CV):\n"
             info_text += f"Empty parking spots found: {len(parking_spot_rects)}\n\n"
@@ -605,7 +634,7 @@ class ParkingGridConverter:
             self.display_image(self.processed_image, self.image_canvas)
             
             parking_count = len(self.parking_spots) if self.parking_spots else 0
-            self.update_status(f"✓ YOLO: {obstacle_count} obstacles | Parking: {parking_count} spots")
+            self.update_status(f"YOLO: {obstacle_count} obstacles | Parking: {parking_count} spots")
             
             info_text = f"Combined Detection Results:\n"
             info_text += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -783,13 +812,16 @@ class ParkingGridConverter:
             self.display_image(grid_image, self.image_canvas)
             self.visualize_grid_matrix()
             
+            # Save grid image
+            self.save_grid_image(self.grid_matrix, "9_grid_matrix.png")
+            
             # Statistics
             total_cells = self.grid_rows * self.grid_cols
             obstacle_cells = np.sum(self.grid_matrix == 1)
             parking_cells = np.sum(self.grid_matrix == 2)
             navigable_cells = np.sum(self.grid_matrix == 0)
             
-            self.update_status(f"✓ Grid generated: {self.grid_cols}x{self.grid_rows} from {width}x{height} image")
+            self.update_status(f"Grid generated: {self.grid_cols}x{self.grid_rows} from {width}x{height} image")
             
             info_text = f"Grid Matrix Generated:\n"
             info_text += f"Image: {width}x{height} pixels\n"
@@ -841,55 +873,144 @@ class ParkingGridConverter:
             scrollregion=(0, 0, self.grid_cols * cell_size, self.grid_rows * cell_size)
         )
     
-    def export_grid(self):
-        """Export grid matrix to file"""
-        if self.grid_matrix is None:
-            messagebox.showwarning("Warning", "Please generate grid first!")
-            return
-        
-        file_path = filedialog.asksaveasfilename(
-            title="Export Grid Matrix",
-            defaultextension=".json",
-            filetypes=[
-                ("JSON files", "*.json"),
-                ("NumPy files", "*.npy"),
-                ("Text files", "*.txt"),
-                ("All files", "*.*")
-            ]
-        )
-        
-        if not file_path:
-            return
-        
+    def save_grid_image(self, grid, filename, is_binary=False):
+        """Save grid matrix as an image file"""
         try:
-            if file_path.endswith('.json'):
-                grid_data = {
-                    'grid': self.grid_matrix.tolist(),
-                    'rows': self.grid_rows,
-                    'cols': self.grid_cols,
-                    'legend': {
-                        '0': 'navigable',
-                        '1': 'obstacle',
-                        '2': 'empty_parking_spot'
-                    }
-                }
-                with open(file_path, 'w') as f:
-                    json.dump(grid_data, f, indent=2)
-            elif file_path.endswith('.npy'):
-                np.save(file_path, self.grid_matrix)
-            else:
-                with open(file_path, 'w') as f:
-                    f.write(f"# Grid Matrix: {self.grid_rows}x{self.grid_cols}\n")
-                    f.write(f"# 0=navigable, 1=obstacle, 2=empty_parking_spot\n\n")
-                    for row in self.grid_matrix:
-                        f.write(' '.join(map(str, row)) + '\n')
+            output_folder = "cv_process_images"
+            os.makedirs(output_folder, exist_ok=True)
             
-            messagebox.showinfo("Success", f"Grid exported to:\n{file_path}")
-            self.update_status(f"✓ Grid exported: {os.path.basename(file_path)}")
+            rows, cols = grid.shape
+            
+            if is_binary:
+                # Binary grid (0 = white/navigable, 1 = black/obstacle)
+                grid_img = np.zeros((rows, cols), dtype=np.uint8)
+                grid_img[grid == 0] = 255  # Navigable = white
+                grid_img[grid == 1] = 0    # Obstacle = black
+            else:
+                # Color grid (0 = white, 1 = red, 2 = green)
+                grid_img = np.zeros((rows, cols, 3), dtype=np.uint8)
+                grid_img[grid == 0] = [255, 255, 255]  # White for navigable
+                grid_img[grid == 1] = [0, 0, 255]      # Red for obstacles (BGR)
+                grid_img[grid == 2] = [0, 255, 0]      # Green for parking spots (BGR)
+            
+            # Scale up for better visibility
+            scale = 5
+            grid_img_scaled = cv2.resize(grid_img, (cols * scale, rows * scale), interpolation=cv2.INTER_NEAREST)
+            
+            filepath = os.path.join(output_folder, filename)
+            cv2.imwrite(filepath, grid_img_scaled)
+            print(f"Grid image saved: {filepath}")
             
         except Exception as e:
-            messagebox.showerror("Error", f"Error exporting grid: {str(e)}")
+            print(f"Error saving grid image: {e}")
     
+    def save_inflated_grid_image(self, inflated_grid, original_grid, filename):
+        """Save inflated grid image with parking spots shown"""
+        try:
+            output_folder = "cv_process_images"
+            os.makedirs(output_folder, exist_ok=True)
+            
+            rows, cols = inflated_grid.shape
+            
+            # Create color image
+            grid_img = np.zeros((rows, cols, 3), dtype=np.uint8)
+            
+            # First set navigable areas (white)
+            grid_img[inflated_grid == 0] = [255, 255, 255]
+            
+            # Second: Draw parking spots from original grid (green) 
+            grid_img[original_grid == 2] = [0, 255, 0]  # Green for parking spots (BGR)
+            
+            # Third: Draw inflated obstacles on top (red) - overlaps green parking spots
+            grid_img[inflated_grid == 1] = [0, 0, 255]  # Red for inflated obstacles (BGR)
+            
+            # Scale up for better visibility
+            scale = 5
+            grid_img_scaled = cv2.resize(grid_img, (cols * scale, rows * scale), interpolation=cv2.INTER_NEAREST)
+            
+            filepath = os.path.join(output_folder, filename)
+            cv2.imwrite(filepath, grid_img_scaled)
+            print(f"Inflated grid image saved: {filepath}")
+            
+        except Exception as e:
+            print(f"Error saving inflated grid image: {e}")
+    
+    def save_path_image(self, path, filename, is_smoothed=False):
+        """Save path on grid as an image file"""
+        try:
+            output_folder = "cv_process_images"
+            os.makedirs(output_folder, exist_ok=True)
+            
+            rows, cols = self.grid_rows, self.grid_cols
+            scale = 5
+            
+            # Create base image from grid
+            grid_img = np.zeros((rows * scale, cols * scale, 3), dtype=np.uint8)
+            
+            # Draw grid background
+            for row in range(rows):
+                for col in range(cols):
+                    x1, y1 = col * scale, row * scale
+                    x2, y2 = x1 + scale, y1 + scale
+                    
+                    if self.grid_matrix[row, col] == 1:
+                        color = (50, 50, 50)  # Dark gray for obstacles
+                    elif self.grid_matrix[row, col] == 2:
+                        color = (0, 255, 0)  # Green for parking spots
+                    else:
+                        color = (255, 255, 255)  # White for navigable
+                    
+                    cv2.rectangle(grid_img, (x1, y1), (x2, y2), color, -1)
+            
+            # Draw path
+            if is_smoothed:
+                # Smoothed path - draw as continuous line
+                path_color = (0, 255, 0)  # Green for smoothed path (BGR)
+                for i in range(len(path) - 1):
+                    row1, col1 = path[i]
+                    row2, col2 = path[i + 1]
+                    
+                    pt1 = (int(col1 * scale + scale // 2), int(row1 * scale + scale // 2))
+                    pt2 = (int(col2 * scale + scale // 2), int(row2 * scale + scale // 2))
+                    
+                    cv2.line(grid_img, pt1, pt2, path_color, 2)
+            else:
+                # A* path - draw cells and connecting lines
+                path_color = (0, 200, 255)  # Yellow-orange for A* path (BGR)
+                for i, (row, col) in enumerate(path):
+                    x1, y1 = col * scale, row * scale
+                    x2, y2 = x1 + scale, y1 + scale
+                    cv2.rectangle(grid_img, (x1, y1), (x2, y2), path_color, -1)
+                
+                # Draw lines connecting path points
+                for i in range(len(path) - 1):
+                    row1, col1 = path[i]
+                    row2, col2 = path[i + 1]
+                    
+                    pt1 = (col1 * scale + scale // 2, row1 * scale + scale // 2)
+                    pt2 = (col2 * scale + scale // 2, row2 * scale + scale // 2)
+                    
+                    cv2.line(grid_img, pt1, pt2, (0, 140, 255), 2)
+            
+            # Draw start point (cyan)
+            if self.start_point:
+                sr, sc = self.start_point
+                cv2.circle(grid_img, (sc * scale + scale // 2, sr * scale + scale // 2), 
+                          scale * 2, (255, 255, 0), -1)  # Cyan (BGR)
+            
+            # Draw end point (magenta)
+            if self.end_point:
+                er, ec = self.end_point
+                cv2.circle(grid_img, (ec * scale + scale // 2, er * scale + scale // 2), 
+                          scale * 2, (255, 0, 255), -1)  # Magenta (BGR)
+            
+            filepath = os.path.join(output_folder, filename)
+            cv2.imwrite(filepath, grid_img)
+            print(f"Path image saved: {filepath}")
+            
+        except Exception as e:
+            print(f"Error saving path image: {e}")
+
     def set_mode(self, mode):
         """Set interaction mode for setting start/end points"""
         self.click_mode = mode
@@ -927,10 +1048,10 @@ class ParkingGridConverter:
             if 0 <= grid_row < self.grid_rows and 0 <= grid_col < self.grid_cols:
                 if self.click_mode == "start":
                     self.start_point = (grid_row, grid_col)
-                    self.update_status(f"✓ Start point set: ({grid_row}, {grid_col})")
+                    self.update_status(f"Start point set: ({grid_row}, {grid_col})")
                 elif self.click_mode == "end":
                     self.end_point = (grid_row, grid_col)
-                    self.update_status(f"✓ End point set: ({grid_row}, {grid_col})")
+                    self.update_status(f"End point set: ({grid_row}, {grid_col})")
                 
                 self.click_mode = None
                 self.redraw_with_points()
@@ -1015,6 +1136,8 @@ class ParkingGridConverter:
             if self.clearance_radius > 0:
                 self.inflated_grid = self.inflate_obstacles(working_grid, self.clearance_radius)
                 self.update_status(f"Inflating obstacles with clearance: {self.clearance_radius}")
+                # Save inflated grid image with parking spots
+                self.save_inflated_grid_image(self.inflated_grid, self.grid_matrix, "10_inflated_grid.png")
             else:
                 self.inflated_grid = working_grid
             
@@ -1035,10 +1158,16 @@ class ParkingGridConverter:
                     print(f"Smoothing failed: {e}")
                     self.smoothed_path = None
                 
+                # Save path images
+                self.save_path_image(path, "11_astar_path.png")
+                if self.smoothed_path is not None:
+                    self.save_path_image(self.smoothed_path, "12_smoothed_path.png", is_smoothed=True)
+                
                 self.redraw_with_points()
                 self.visualize_grid_with_path()
                 
                 info_text = f"A* Pathfinding Complete!\n"
+                info_text += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 info_text += f"Start: {self.start_point}\n"
                 info_text += f"End: {self.end_point}\n"
                 info_text += f"Path nodes: {len(path)}\n"
@@ -1047,9 +1176,10 @@ class ParkingGridConverter:
                     info_text += f"Clearance: {self.clearance_radius} cells\n"
                 if self.smoothed_path is not None:
                     info_text += f"Smoothing: B-spline (100 points)\n"
-                info_text += f"Movement: 8-directional (diagonal)"
+                info_text += f"Movement: 8-directional (diagonal)\n\n"
+                info_text += f"Click 'Simulate' to animate car!"
                 
-                self.update_status(f"✓ Path found! {len(path)} nodes, {path_length:.2f} units")
+                self.update_status(f"Path found! {len(path)} nodes, {path_length:.2f} units")
                 self.update_info(info_text)
             else:
                 messagebox.showwarning("No Path", 
@@ -1211,6 +1341,7 @@ class ParkingGridConverter:
     
     def clear_path(self):
         """Clear start, end points and path"""
+        self.stop_simulation()  # Stop any running simulation
         self.start_point = None
         self.end_point = None
         self.path = None
@@ -1223,6 +1354,324 @@ class ParkingGridConverter:
                 self.display_image(self.processed_image, self.image_canvas)
         
         self.update_status("Path cleared")
+    
+    def start_simulation(self):
+        """Start car simulation along the smoothed path in fullscreen window"""
+        if self.path is None:
+            messagebox.showwarning("Warning", "Please run A* pathfinding first!")
+            return
+        
+        # Always use smoothed path
+        if self.smoothed_path is not None and len(self.smoothed_path) > 1:
+            self.simulation_path = self.smoothed_path
+        else:
+            self.simulation_path = [(float(p[0]), float(p[1])) for p in self.path]
+        
+        if len(self.simulation_path) < 2:
+            messagebox.showwarning("Warning", "Path too short for simulation!")
+            return
+        
+        self.simulation_running = True
+        self.simulation_index = 0
+        
+        # Calculate initial heading
+        if len(self.simulation_path) > 1:
+            dx = self.simulation_path[1][1] - self.simulation_path[0][1]
+            dy = self.simulation_path[1][0] - self.simulation_path[0][0]
+            self.car_heading = np.degrees(np.arctan2(dx, -dy))
+        
+        # Create fullscreen simulation window
+        self.create_simulation_window()
+        
+        # Update button states
+        self.sim_start_btn.config(state=tk.DISABLED)
+        
+        self.update_status("Simulation started (fullscreen)...")
+        self.animate_car()
+    
+    def create_simulation_window(self):
+        """Create a fullscreen window for simulation"""
+        # Close existing window if any
+        if self.simulation_window is not None:
+            try:
+                self.simulation_window.destroy()
+            except:
+                pass
+        
+        # Create new toplevel window
+        self.simulation_window = tk.Toplevel(self.root)
+        self.simulation_window.title("Parking Simulation")
+        
+        # Make it fullscreen
+        self.simulation_window.attributes('-fullscreen', True)
+        self.simulation_window.configure(bg='black')
+        
+        # Bind Escape key to close
+        self.simulation_window.bind('<Escape>', lambda e: self.close_simulation_window())
+        
+        # Handle window close button
+        self.simulation_window.protocol("WM_DELETE_WINDOW", self.close_simulation_window)
+        
+        # Create canvas for simulation
+        self.simulation_canvas = tk.Canvas(
+            self.simulation_window,
+            bg='black',
+            highlightthickness=0
+        )
+        self.simulation_canvas.pack(fill=tk.BOTH, expand=True)
+        
+        # Add instruction label
+        instruction_label = ttk.Label(
+            self.simulation_window,
+            text="Press ESC to exit fullscreen",
+            font=("Arial", 12),
+            foreground="white",
+            background="black"
+        )
+        instruction_label.place(relx=0.5, y=30, anchor=tk.CENTER)
+        
+        # Add close button (X) in top-right corner
+        close_btn = tk.Button(
+            self.simulation_window,
+            text="✕",
+            font=("Arial", 16, "bold"),
+            fg="white",
+            bg="#cc0000",
+            activeforeground="white",
+            activebackground="#ff0000",
+            bd=0,
+            padx=15,
+            pady=5,
+            cursor="hand2",
+            command=self.close_simulation_window
+        )
+        close_btn.place(relx=1.0, x=-20, y=20, anchor=tk.NE)
+        
+        # Wait for window to be ready
+        self.simulation_window.update()
+    
+    def close_simulation_window(self):
+        """Close the simulation window and stop simulation"""
+        self.simulation_running = False
+        self.simulation_index = 0
+        self.simulation_path = None
+        
+        if self.simulation_window is not None:
+            try:
+                self.simulation_window.destroy()
+            except:
+                pass
+            self.simulation_window = None
+            self.simulation_canvas = None
+        
+        # Update button states
+        self.sim_start_btn.config(state=tk.NORMAL)
+        
+        # Redraw main canvas without car
+        if self.path:
+            self.redraw_with_points()
+        
+        self.update_status("Simulation window closed")
+    
+    def stop_simulation(self):
+        """Stop the simulation and close fullscreen window"""
+        self.simulation_running = False
+        self.simulation_index = 0
+        self.simulation_path = None
+        
+        # Close fullscreen window if open
+        if self.simulation_window is not None:
+            try:
+                self.simulation_window.destroy()
+            except:
+                pass
+            self.simulation_window = None
+            self.simulation_canvas = None
+        
+        # Update button states
+        self.sim_start_btn.config(state=tk.NORMAL)
+        
+        # Redraw without car
+        if self.path:
+            self.redraw_with_points()
+    
+    def animate_car(self):
+        """Animate the car along the path"""
+        if not self.simulation_running:
+            return
+        
+        if self.simulation_path is None or self.simulation_index >= len(self.simulation_path):
+            # Simulation complete
+            self.simulation_running = False
+            self.sim_start_btn.config(state=tk.NORMAL)
+            
+            self.update_status("Simulation complete! Press X to close window.")
+            self.update_info(
+                f"Simulation Complete!\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"Path type: smoothed\n"
+                f"Total waypoints: {len(self.simulation_path)}\n"
+                f"Start: {self.start_point}\n"
+                f"End: {self.end_point}\n\n"
+                f"The car successfully navigated\n"
+                f"from start to destination!"
+            )
+            return
+        
+        # Get current position
+        current_pos = self.simulation_path[self.simulation_index]
+        
+        # Calculate heading based on next position
+        if self.simulation_index < len(self.simulation_path) - 1:
+            next_pos = self.simulation_path[self.simulation_index + 1]
+            dx = next_pos[1] - current_pos[1]
+            dy = next_pos[0] - current_pos[0]
+            if abs(dx) > 0.001 or abs(dy) > 0.001:  # Avoid division issues
+                target_heading = np.degrees(np.arctan2(dx, -dy))
+                # Smooth heading transition
+                heading_diff = target_heading - self.car_heading
+                # Normalize to -180 to 180
+                while heading_diff > 180:
+                    heading_diff -= 360
+                while heading_diff < -180:
+                    heading_diff += 360
+                self.car_heading += heading_diff * 0.3  # Smooth turn
+        
+        # Draw the scene with car
+        self.draw_scene_with_car(current_pos)
+        
+        # Move to next position
+        self.simulation_index += 1
+        
+        # Calculate delay based on speed setting
+        speed = int(self.sim_speed_spinbox.get())
+        delay = max(10, 200 - speed * 2)  # 10ms to 200ms delay
+        
+        # Update progress
+        progress = (self.simulation_index / len(self.simulation_path)) * 100
+        self.update_status(f"Simulating... {progress:.1f}% complete")
+        
+        # Schedule next frame
+        self.root.after(delay, self.animate_car)
+    
+    def draw_scene_with_car(self, car_pos):
+        """Draw the image with path and car at current position"""
+        if self.processed_image is None:
+            return
+        
+        img = self.processed_image.copy()
+        height, width = img.shape[:2]
+        cell_width = width // self.grid_cols
+        cell_height = height // self.grid_rows
+        
+        # Draw original path (yellow-orange, dimmed)
+        if self.path:
+            for i in range(len(self.path) - 1):
+                row1, col1 = self.path[i]
+                row2, col2 = self.path[i + 1]
+                
+                center1 = (col1 * cell_width + cell_width // 2,
+                          row1 * cell_height + cell_height // 2)
+                center2 = (col2 * cell_width + cell_width // 2,
+                          row2 * cell_height + cell_height // 2)
+                
+                cv2.line(img, center1, center2, (180, 140, 0), 2)
+        
+        # Draw smoothed path (green)
+        if self.smoothed_path is not None and len(self.smoothed_path) > 1:
+            for i in range(len(self.smoothed_path) - 1):
+                row1, col1 = self.smoothed_path[i]
+                row2, col2 = self.smoothed_path[i + 1]
+                
+                x1 = int(col1 * cell_width + cell_width // 2)
+                y1 = int(row1 * cell_height + cell_height // 2)
+                x2 = int(col2 * cell_width + cell_width // 2)
+                y2 = int(row2 * cell_height + cell_height // 2)
+                
+                cv2.line(img, (x1, y1), (x2, y2), (0, 200, 0), 2)
+        
+        # Draw start point
+        if self.start_point:
+            row, col = self.start_point
+            center_x = col * cell_width + cell_width // 2
+            center_y = row * cell_height + cell_height // 2
+            cv2.circle(img, (center_x, center_y), 15, (0, 255, 255), -1)
+            cv2.putText(img, "S", (center_x - 6, center_y + 5),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
+        
+        # Draw end point
+        if self.end_point:
+            row, col = self.end_point
+            center_x = col * cell_width + cell_width // 2
+            center_y = row * cell_height + cell_height // 2
+            cv2.circle(img, (center_x, center_y), 15, (255, 0, 255), -1)
+            cv2.putText(img, "E", (center_x - 6, center_y + 5),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+        
+        # Draw car at current position
+        car_row, car_col = car_pos
+        car_x = int(car_col * cell_width + cell_width // 2)
+        car_y = int(car_row * cell_height + cell_height // 2)
+        
+        # Car dimensions based on parking spot sizes
+        if self.parking_spots and len(self.parking_spots) > 0:
+            # Calculate average parking spot dimensions
+            avg_spot_width = sum(s['bounding_rect']['width'] for s in self.parking_spots) / len(self.parking_spots)
+            avg_spot_height = sum(s['bounding_rect']['height'] for s in self.parking_spots) / len(self.parking_spots)
+            
+            # Car should fit inside parking spot (smaller for better visibility)
+            spot_min = min(avg_spot_width, avg_spot_height)
+            spot_max = max(avg_spot_width, avg_spot_height)
+            
+            car_width = int(spot_min * 0.80)
+            car_length = int(spot_max * 0.70)
+        else:
+            # Fallback: scale based on cell size
+            car_length = max(30, cell_height * 2)
+            car_width = max(18, cell_width)
+        
+        # Create car shape (rectangle with direction indicator)
+        angle_rad = np.radians(self.car_heading)
+        cos_a = np.cos(angle_rad)
+        sin_a = np.sin(angle_rad)
+        
+        # Car body corners (relative to center)
+        half_len = car_length // 2
+        half_wid = car_width // 2
+        
+        corners = [
+            (-half_wid, -half_len),  # rear left
+            (half_wid, -half_len),   # rear right
+            (half_wid, half_len),    # front right
+            (-half_wid, half_len),   # front left
+        ]
+        
+        # Rotate and translate corners
+        rotated_corners = []
+        for cx, cy in corners:
+            rx = int(car_x + cx * cos_a - cy * sin_a)
+            ry = int(car_y + cx * sin_a + cy * cos_a)
+            rotated_corners.append((rx, ry))
+        
+        # Draw car body (simple rectangle)
+        pts = np.array(rotated_corners, dtype=np.int32)
+        cv2.fillPoly(img, [pts], (30, 144, 255))  # Dodger blue
+        cv2.polylines(img, [pts], True, (0, 0, 139), 2)  # Dark blue border
+        
+        # Simulation info overlay (commented out)
+        # progress = (self.simulation_index / len(self.simulation_path)) * 100
+        # cv2.rectangle(img, (5, 60), (250, 130), (0, 0, 0), -1)
+        # cv2.rectangle(img, (5, 60), (250, 130), (255, 255, 255), 2)
+        # cv2.putText(img, f"Progress: {progress:.1f}%", (15, 85),
+        #            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        # cv2.putText(img, f"Heading: {self.car_heading:.1f} deg", (15, 115),
+        #            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        
+        # Display on fullscreen simulation canvas if available, otherwise main canvas
+        if self.simulation_canvas is not None:
+            self.display_image(img, self.simulation_canvas)
+        else:
+            self.display_image(img, self.image_canvas)
     
     def display_image(self, img, canvas):
         """Display image on canvas with proper scaling"""
