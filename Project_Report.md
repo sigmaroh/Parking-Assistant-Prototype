@@ -5,9 +5,11 @@
 
 ### A PROJECT REPORT
 
+**Note:** All processing images referenced in this report are located in the `cv_process_images/` directory. The complete image processing pipeline generates 28 intermediate images documenting each step of the detection, occupancy analysis, grid generation, and pathfinding process.
+
 **Submitted in Partial Fulfillment of the Requirements for the Award of the Degree of**
 
-## BACHELOR OF TECHNOLOGY
+## MASTER OF TECHNOLOGY / MASTER OF SCIENCE
 ### in
 ## COMPUTER SCIENCE AND ENGINEERING
 
@@ -33,7 +35,7 @@
 
 # CERTIFICATE
 
-This is to certify that the project entitled **"Parking Lot Path Planner: An Intelligent Parking Assistance System Using Computer Vision and A* Pathfinding Algorithm"** submitted by **[Student Name]** bearing Roll No. **[Roll Number]** in partial fulfillment of the requirements for the award of the degree of **Bachelor of Technology** in **Computer Science and Engineering** from **[University Name]** is a bonafide record of the project work carried out by him/her under my supervision and guidance.
+This is to certify that the project entitled **"Parking Lot Path Planner: An Intelligent Parking Assistance System Using Computer Vision and A* Pathfinding Algorithm"** submitted by **[Student Name]** bearing Roll No. **[Roll Number]** in partial fulfillment of the requirements for the award of the degree of **Master of Technology / Master of Science** in **Computer Science and Engineering** from **[University Name]** is a bonafide record of the project work carried out by him/her under my supervision and guidance.
 
 The work embodied in this project has not been submitted for any other degree or diploma.
 
@@ -185,11 +187,32 @@ The application features a user-friendly **Tkinter-based GUI** that allows users
 | 5.1 | Main Application Window | 40 |
 | 5.2 | Image Processing Pipeline | 41 |
 | 5.3 | Grid Visualization | 42 |
-| 6.1 | Original Parking Lot Image | 46 |
-| 6.2 | Detected Parking Spots | 46 |
-| 6.3 | YOLO Obstacle Detection | 47 |
-| 6.4 | Generated Navigation Grid | 47 |
-| 6.5 | A* Path with Smoothing | 48 |
+| 6.1 | Original Parking Lot Image (1_original.png) | 46 |
+| 6.2 | Grayscale Conversion (2_grayscale.png) | 46 |
+| 6.3 | Gaussian Blur Applied (3_blurred.png) | 46 |
+| 6.4 | Canny Edge Detection (4_edges_canny.png) | 47 |
+| 6.5 | Hough Line Detection (5_hough_lines.png) | 47 |
+| 6.6 | Classified Horizontal and Vertical Lines (6_classified_lines_HV.png) | 47 |
+| 6.7 | All Detected Lines (7_all_detected_lines.png) | 47 |
+| 6.8 | Morphological Closing (8_lines_closed.png) | 48 |
+| 6.9 | Lines Thickened (9_lines_thickened.png) | 48 |
+| 6.10 | Inverted Regions (10_inverted_regions.png) | 48 |
+| 6.11 | Valid Parking Regions (13_valid_parking_regions.png) | 49 |
+| 6.12 | Detected Contours (14_detected_contours.png) | 49 |
+| 6.13 | Rectangles Filtered by Shape (15_rectangles_filtered_by_shape.png) | 49 |
+| 6.14 | Final Parking Spaces (16_parking_spaces_final.png) | 49 |
+| 6.15 | Detected Parking Spots with Occupancy (17_detected_parking_spots.png) | 50 |
+| 6.16 | Occupancy Analysis (18_occupancy_analysis.png) | 50 |
+| 6.17 | Occupancy Edge Detection (19_occupancy_edges.png) | 50 |
+| 6.18 | Occupancy Variance Analysis (20_occupancy_variance.png) | 50 |
+| 6.19 | Occupancy Bright Pixels (21_occupancy_bright_pixels.png) | 51 |
+| 6.20 | Occupancy Dark Pixels (22_occupancy_dark_pixels.png) | 51 |
+| 6.21 | Occupancy Combined Score (23_occupancy_combined_score.png) | 51 |
+| 6.22 | Occupancy Color Coded (24_occupancy_color_coded.png) | 51 |
+| 6.23 | Generated Grid Matrix (25_grid_matrix.png) | 52 |
+| 6.24 | Inflated Grid with Clearance (26_inflated_grid.png) | 52 |
+| 6.25 | A* Path Visualization (27_astar_path.png) | 52 |
+| 6.26 | Smoothed Path (28_smoothed_path.png) | 52 |
 
 ---
 
@@ -1177,28 +1200,54 @@ END
 ### 5.1.3 Project Structure
 
 ```
-Parking-Assistant-Prototype/
-├── main.py                      # Main application file
-├── a_star.py                    # Standalone A* implementation
-├── generate_use_case_diagram.py # Diagram generator
-├── use_case_diagram.puml        # PlantUML diagram
-├── use_case_diagram.png         # Generated diagram image
-├── yolov8n.pt                   # YOLO model weights
-├── cv_process_images/           # CV processing step images
-│   ├── 1_original.png
-│   ├── 2_grayscale.png
-│   ├── 3_blurred.png
-│   ├── 4_edges_canny.png
-│   ├── 5_morphology_closed.png
-│   ├── 6_dilated.png
-│   ├── 7_all_contours.png
-│   └── 8_detected_parking_spots.png
-├── documents/                   # Reference documents
-├── Layout 1.png                 # Sample parking lot images
+Parking-Assistant/
+├── main.py                      # Main application file (ParkingGridConverter class)
+├── a_star.py                    # Standalone A* pathfinding implementation
+├── mpc_controller.py            # Model Predictive Controller (for vehicle dynamics)
+├── cv_process_images/           # Complete CV processing pipeline images
+│   ├── 1_original.png          # Original input image
+│   ├── 2_grayscale.png         # Grayscale conversion
+│   ├── 3_blurred.png           # Gaussian blur
+│   ├── 4_edges_canny.png       # Canny edge detection
+│   ├── 5_hough_lines.png       # Hough line transform
+│   ├── 6_classified_lines_HV.png  # Horizontal/vertical classification
+│   ├── 7_all_detected_lines.png    # All detected lines
+│   ├── 8_lines_closed.png      # Morphological closing
+│   ├── 9_lines_thickened.png   # Line dilation
+│   ├── 10_inverted_regions.png # Inverted binary regions
+│   ├── 13_valid_parking_regions.png  # Valid parking regions
+│   ├── 14_detected_contours.png      # Detected contours
+│   ├── 15_rectangles_filtered_by_shape.png  # Shape-filtered rectangles
+│   ├── 16_parking_spaces_final.png   # Final parking spaces
+│   ├── 17_detected_parking_spots.png # Parking spots with occupancy
+│   ├── 18_occupancy_analysis.png     # Occupancy analysis
+│   ├── 19_occupancy_edges.png        # Edge-based occupancy
+│   ├── 20_occupancy_variance.png     # Variance-based occupancy
+│   ├── 21_occupancy_bright_pixels.png  # Bright pixel detection
+│   ├── 22_occupancy_dark_pixels.png    # Dark pixel detection
+│   ├── 23_occupancy_combined_score.png # Combined occupancy score
+│   ├── 24_occupancy_color_coded.png   # Color-coded occupancy
+│   ├── 25_grid_matrix.png       # Generated grid matrix
+│   ├── 26_inflated_grid.png     # Inflated grid with clearance
+│   ├── 27_astar_path.png        # A* pathfinding result
+│   └── 28_smoothed_path.png     # B-spline smoothed path
+├── documents/                   # Reference documents and papers
+├── Layout 1.png                # Sample parking lot test images
 ├── Layout 2.png
-├── requirements.txt             # Python dependencies
-├── README.md                    # Project documentation
-└── venv/                        # Python virtual environment
+├── Layout 3.jpg
+├── Layout 4.jpg
+├── layout 5.jpg
+├── car.png                     # Car icon for visualization
+├── yolo11l.pt                  # YOLO model weights (various versions)
+├── yolo11n.pt
+├── yolo11x.pt
+├── yolov8n.pt
+├── yolov8x-seg.pt
+├── yolov8x.pt
+├── requirements.txt            # Python dependencies
+├── README.md                   # Project documentation
+├── Project_Report.md           # This report
+└── venv/                       # Python virtual environment
 ```
 
 ## 5.2 Module Description
@@ -1689,16 +1738,49 @@ The project follows a comprehensive testing approach:
 
 ### 6.3.2 Sample Processing Results
 
-**Image Processing Pipeline:**
+**Complete Image Processing Pipeline:**
 
-1. **Original Image**: Raw parking lot photograph
-2. **Grayscale**: Reduced to single channel
-3. **Blurred**: Gaussian blur applied (5x5 kernel)
-4. **Edges**: Canny edge detection (50-150 threshold)
-5. **Closed**: Morphological closing to connect edges
-6. **Dilated**: Dilation to thicken contours
-7. **Contours**: All detected contours
-8. **Final**: Validated parking spots highlighted
+The system generates a comprehensive set of intermediate images during processing, all saved in the `cv_process_images/` directory. The complete pipeline is as follows:
+
+**Preprocessing Stage:**
+1. **Original Image** (Figure 6.1 - `1_original.png`): Raw parking lot photograph loaded from file
+2. **Grayscale Conversion** (Figure 6.2 - `2_grayscale.png`): RGB image converted to single-channel grayscale for efficient processing
+3. **Gaussian Blur** (Figure 6.3 - `3_blurred.png`): Noise reduction using 3×3 Gaussian kernel to smooth the image
+
+**Edge Detection Stage:**
+4. **Canny Edge Detection** (Figure 6.4 - `4_edges_canny.png`): Edge detection with thresholds (50-150) to identify parking line boundaries
+
+**Line Detection Stage:**
+5. **Hough Line Transform** (Figure 6.5 - `5_hough_lines.png`): Detects line segments using probabilistic Hough transform
+6. **Classified Lines** (Figure 6.6 - `6_classified_lines_HV.png`): Lines separated into horizontal (blue) and vertical (green) categories
+7. **All Detected Lines** (Figure 6.7 - `7_all_detected_lines.png`): Combined visualization of all detected line segments
+
+**Morphological Processing:**
+8. **Morphological Closing** (Figure 6.8 - `8_lines_closed.png`): Closes gaps in horizontal and vertical lines using rectangular kernels
+9. **Lines Thickened** (Figure 6.9 - `9_lines_thickened.png`): Dilation applied to ensure connectivity at line intersections
+10. **Inverted Regions** (Figure 6.10 - `10_inverted_regions.png`): Inverted binary image to identify parking space regions
+
+**Parking Spot Detection:**
+11. **Valid Parking Regions** (Figure 6.11 - `13_valid_parking_regions.png`): Connected components filtered by area and aspect ratio
+12. **Detected Contours** (Figure 6.12 - `14_detected_contours.png`): All contours extracted from valid regions
+13. **Rectangles Filtered by Shape** (Figure 6.13 - `15_rectangles_filtered_by_shape.png`): Rectangularity validation (≥80% fit to rectangle)
+14. **Final Parking Spaces** (Figure 6.14 - `16_parking_spaces_final.png`): Duplicate removal and final validated parking spots
+
+**Occupancy Detection:**
+15. **Detected Parking Spots** (Figure 6.15 - `17_detected_parking_spots.png`): Final output with empty (green) and occupied (red) spots labeled
+16. **Occupancy Analysis** (Figure 6.16 - `18_occupancy_analysis.png`): Visualization showing occupancy confidence scores
+17. **Occupancy Edge Detection** (Figure 6.17 - `19_occupancy_edges.png`): Edge density analysis for each parking spot
+18. **Occupancy Variance** (Figure 6.18 - `20_occupancy_variance.png`): Texture variation analysis using Laplacian operator
+19. **Occupancy Bright Pixels** (Figure 6.19 - `21_occupancy_bright_pixels.png`): Detection of bright pixels (white car roofs, threshold >220)
+20. **Occupancy Dark Pixels** (Figure 6.20 - `22_occupancy_dark_pixels.png`): Detection of dark pixels (car shadows/body, threshold <50)
+21. **Occupancy Combined Score** (Figure 6.21 - `23_occupancy_combined_score.png`): Weighted combination of all features
+22. **Occupancy Color Coded** (Figure 6.22 - `24_occupancy_color_coded.png`): Final occupancy classification with color coding
+
+**Grid and Pathfinding:**
+23. **Generated Grid Matrix** (Figure 6.23 - `25_grid_matrix.png`): Navigable grid with obstacles (red), empty spots (green), and free space (white)
+24. **Inflated Grid** (Figure 6.24 - `26_inflated_grid.png`): Grid with obstacle inflation for safe clearance radius
+25. **A* Path Visualization** (Figure 6.25 - `27_astar_path.png`): Optimal path computed by A* algorithm (yellow-orange)
+26. **Smoothed Path** (Figure 6.26 - `28_smoothed_path.png`): B-spline smoothed path for vehicle-friendly navigation (green)
 
 ### 6.3.3 Grid Generation Results
 
@@ -1711,9 +1793,16 @@ For a 1200x800 pixel image with 10px cell size:
 
 ### 6.3.4 Pathfinding Results
 
-- A* consistently finds optimal paths
-- Path length varies based on obstacle layout
-- Smoothing reduces path waypoints by ~70%
+- A* consistently finds optimal paths with 8-directional movement
+- Path length varies based on obstacle layout and clearance radius
+- Smoothing reduces path waypoints by ~70% while maintaining feasibility
+- Obstacle inflation ensures safe clearance (configurable 0-5 cells)
+- B-spline interpolation generates smooth, vehicle-friendly trajectories
+
+**Visual Results:**
+- Figure 6.25 (`27_astar_path.png`) shows the raw A* path in yellow-orange
+- Figure 6.26 (`28_smoothed_path.png`) shows the B-spline smoothed path in green
+- The smoothed path maintains the optimal route while eliminating sharp turns
 
 ## 6.4 Performance Evaluation
 
@@ -1909,16 +1998,45 @@ Key functions:
 
 ## B.1 Image Processing Pipeline
 
-The following images are generated during parking spot detection:
+All processing images are saved in the `cv_process_images/` directory. The complete pipeline includes:
 
-1. `1_original.png` - Input image
-2. `2_grayscale.png` - Grayscale conversion
-3. `3_blurred.png` - Gaussian blur applied
-4. `4_edges_canny.png` - Edge detection result
-5. `5_morphology_closed.png` - Morphological closing
-6. `6_dilated.png` - Dilation result
-7. `7_all_contours.png` - All detected contours
-8. `8_detected_parking_spots.png` - Final validated spots
+**Preprocessing (Steps 1-3):**
+1. `1_original.png` - Original input parking lot image
+2. `2_grayscale.png` - Grayscale conversion for efficient processing
+3. `3_blurred.png` - Gaussian blur applied for noise reduction
+
+**Edge and Line Detection (Steps 4-7):**
+4. `4_edges_canny.png` - Canny edge detection result
+5. `5_hough_lines.png` - Hough line transform detection
+6. `6_classified_lines_HV.png` - Horizontal and vertical line classification
+7. `7_all_detected_lines.png` - All detected line segments combined
+
+**Morphological Processing (Steps 8-10):**
+8. `8_lines_closed.png` - Morphological closing to connect line gaps
+9. `9_lines_thickened.png` - Dilation to thicken lines
+10. `10_inverted_regions.png` - Inverted binary image for region detection
+
+**Parking Spot Detection (Steps 13-16):**
+13. `13_valid_parking_regions.png` - Valid parking regions after filtering
+14. `14_detected_contours.png` - All detected contours
+15. `15_rectangles_filtered_by_shape.png` - Rectangles filtered by rectangularity
+16. `16_parking_spaces_final.png` - Final validated parking spaces
+
+**Occupancy Analysis (Steps 17-24):**
+17. `17_detected_parking_spots.png` - Final parking spots with occupancy status
+18. `18_occupancy_analysis.png` - Occupancy confidence visualization
+19. `19_occupancy_edges.png` - Edge density analysis
+20. `20_occupancy_variance.png` - Variance/texture analysis
+21. `21_occupancy_bright_pixels.png` - Bright pixel detection
+22. `22_occupancy_dark_pixels.png` - Dark pixel detection
+23. `23_occupancy_combined_score.png` - Combined occupancy score
+24. `24_occupancy_color_coded.png` - Color-coded occupancy classification
+
+**Grid and Pathfinding (Steps 25-28):**
+25. `25_grid_matrix.png` - Generated navigation grid matrix
+26. `26_inflated_grid.png` - Grid with obstacle inflation
+27. `27_astar_path.png` - A* pathfinding result
+28. `28_smoothed_path.png` - B-spline smoothed path
 
 ## B.2 Sample Grid Export (JSON)
 

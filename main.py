@@ -274,12 +274,12 @@ class ParkingGridConverter:
             try:
                 self.root.after(0, lambda: self.update_status("Loading YOLO model (downloading if first time)..."))
                 from ultralytics import YOLO
-                # Load YOLOv8 model (will download on first use)
                 model_path = 'yolov8x-seg.pt'
-                if os.path.exists(model_path):
-                    self.yolo_model = YOLO(model_path)
+                if not os.path.exists(model_path):
+                    # Download the model if not present (will be automatic by yolo, but explicit for clarity)
+                    self.yolo_model = YOLO('yolov8x-seg.pt')  # this will download if not already present
                 else:
-                    self.yolo_model = YOLO('yolov8x-seg.pt')
+                    self.yolo_model = YOLO(model_path)
                 self.root.after(0, lambda: self.update_status("YOLO model loaded! Ready to detect obstacles."))
                 self.root.after(0, lambda: self.update_info(
                     "Workflow:\n"
@@ -361,14 +361,221 @@ class ParkingGridConverter:
         except Exception as e:
             messagebox.showerror("Error", f"Error loading image: {str(e)}")
     
+    def detect_occupancy(self, image, gray, parking_spots, occupancy_threshold=0.10, output_folder="cv_process_images", save_steps=True):
+        """Detect occupancy of parking spots using multi-feature approach from test4.py
+        
+        Uses multiple features:
+        - Edge density (cars have more edges)
+        - Variance (cars have more texture variation)
+        - Bright pixels (white car roofs)
+        - Dark pixels (car shadows/body)
+        """
+        if save_steps:
+            os.makedirs(output_folder, exist_ok=True)
+            
+            # Create visualization images for each step
+            edge_vis = np.zeros_like(gray)
+            variance_vis = np.zeros_like(gray)
+            bright_vis = np.zeros_like(gray)
+            dark_vis = np.zeros_like(gray)
+            combined_vis = np.zeros_like(gray)
+        
+        for spot in parking_spots:
+            # Get parking space bounds
+            x = spot['bounding_rect']['x']
+            y = spot['bounding_rect']['y']
+            w = spot['bounding_rect']['width']
+            h = spot['bounding_rect']['height']
+            
+            # Create mask for this parking space using contour
+            mask = np.zeros(gray.shape[:2], dtype=np.uint8)
+            if 'contour' in spot:
+                cv2.fillPoly(mask, [spot['contour']], 255)
+            else:
+                # Fallback to bounding rectangle
+                cv2.rectangle(mask, (x, y), (x + w, y + h), 255, -1)
+            
+            # Get the ROI
+            roi_gray = gray[y:y+h, x:x+w]
+            roi_mask = mask[y:y+h, x:x+w]
+            
+            if roi_gray.size == 0:
+                spot['is_occupied'] = False
+                spot['occupancy_confidence'] = 0.0
+                continue
+            
+            mask_pixels = np.sum(roi_mask > 0)
+            if mask_pixels == 0:
+                spot['is_occupied'] = False
+                spot['occupancy_confidence'] = 0.0
+                continue
+            
+            # Method 1: Edge density (cars have more edges, but ignore weak edges from lines)
+            # Use higher thresholds to ignore parking line edges
+            edges = cv2.Canny(roi_gray, 80, 200)
+            edges_masked = cv2.bitwise_and(edges, edges, mask=roi_mask)
+            edge_density = np.sum(edges_masked > 0) / (mask_pixels + 1e-5)
+            
+            if save_steps:
+                # Copy edges to visualization (scale for visibility)
+                edge_roi = edge_vis[y:y+h, x:x+w]
+                edge_roi[roi_mask > 0] = edges_masked[roi_mask > 0]
+            
+            # Method 2: Variance (cars have more texture variation)
+            roi_masked = cv2.bitwise_and(roi_gray, roi_gray, mask=roi_mask)
+            masked_pixels = roi_masked[roi_mask > 0]
+            if len(masked_pixels) > 0:
+                variance = np.var(masked_pixels)
+                variance_normalized = variance / 2000  # Normalize (reduced sensitivity)
+                # Create variance visualization using Laplacian (measures local variation)
+                laplacian = cv2.Laplacian(roi_gray, cv2.CV_64F)
+                laplacian_abs = np.abs(laplacian)
+                variance_img = np.clip(laplacian_abs * 2, 0, 255).astype(np.uint8)
+            else:
+                variance_normalized = 0
+                variance_img = np.zeros_like(roi_gray)
+            
+            if save_steps:
+                # Copy variance visualization
+                var_roi = variance_vis[y:y+h, x:x+w]
+                var_roi[roi_mask > 0] = variance_img[roi_mask > 0]
+            
+            # Method 3: Check for bright pixels (white car roofs) - more conservative
+            bright_threshold = 220  # Higher threshold for bright pixels
+            bright_mask = (roi_gray > bright_threshold) & (roi_mask > 0)
+            bright_pixels = np.sum(bright_mask)
+            bright_ratio = bright_pixels / (mask_pixels + 1e-5)
+            
+            if save_steps:
+                # Create bright pixels visualization
+                bright_roi = bright_vis[y:y+h, x:x+w]
+                bright_roi[bright_mask] = 255
+            
+            # Method 4: Check for dark pixels (car shadows/body)
+            dark_threshold = 50
+            dark_mask = (roi_gray < dark_threshold) & (roi_mask > 0)
+            dark_pixels = np.sum(dark_mask)
+            dark_ratio = dark_pixels / (mask_pixels + 1e-5)
+            
+            if save_steps:
+                # Create dark pixels visualization
+                dark_roi = dark_vis[y:y+h, x:x+w]
+                dark_roi[dark_mask] = 255
+            
+            # Combined score - adjusted weights, less sensitive to edges
+            combined_score = (edge_density * 0.3 + variance_normalized * 0.25 + 
+                             bright_ratio * 0.2 + dark_ratio * 0.25)
+            
+            if save_steps:
+                # Create combined visualization (normalize score to 0-255)
+                combined_roi = combined_vis[y:y+h, x:x+w]
+                combined_value = int(np.clip(combined_score * 255 / occupancy_threshold, 0, 255))
+                combined_roi[roi_mask > 0] = combined_value
+            
+            # Determine occupancy
+            spot['is_occupied'] = combined_score > occupancy_threshold
+            spot['occupancy_confidence'] = combined_score
+            spot['occupancy_features'] = {
+                'edge_density': edge_density,
+                'variance_normalized': variance_normalized,
+                'bright_ratio': bright_ratio,
+                'dark_ratio': dark_ratio
+            }
+        
+        # Save step images
+        if save_steps:
+            # Save edge detection visualization
+            cv2.imwrite(os.path.join(output_folder, "19_occupancy_edges.png"), edge_vis)
+            
+            # Save variance visualization
+            cv2.imwrite(os.path.join(output_folder, "20_occupancy_variance.png"), variance_vis)
+            
+            # Save bright pixels visualization
+            cv2.imwrite(os.path.join(output_folder, "21_occupancy_bright_pixels.png"), bright_vis)
+            
+            # Save dark pixels visualization
+            cv2.imwrite(os.path.join(output_folder, "22_occupancy_dark_pixels.png"), dark_vis)
+            
+            # Save combined score visualization
+            cv2.imwrite(os.path.join(output_folder, "23_occupancy_combined_score.png"), combined_vis)
+            
+            # Create color-coded visualization showing all features
+            # Use original RGB image as base
+            color_vis = image.copy()
+            for spot in parking_spots:
+                x = spot['bounding_rect']['x']
+                y = spot['bounding_rect']['y']
+                w = spot['bounding_rect']['width']
+                h = spot['bounding_rect']['height']
+                is_occupied = spot.get('is_occupied', False)
+                confidence = spot.get('occupancy_confidence', 0.0)
+                
+                # Draw bounding box (RGB colors: red for occupied, green for empty)
+                color = (255, 0, 0) if is_occupied else (0, 255, 0)
+                cv2.rectangle(color_vis, (x, y), (x + w, y + h), color, 2)
+                
+                # Add text with confidence
+                cx, cy = map(int, spot['min_area_rect']['center'])
+                status = "OCC" if is_occupied else "EMP"
+                cv2.putText(color_vis, f"P{spot['spot_id']}: {status}", (x, y - 5),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+                cv2.putText(color_vis, f"Score: {confidence:.3f}", (x, y + h + 15),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
+            
+            # Convert RGB to BGR for saving
+            cv2.imwrite(os.path.join(output_folder, "24_occupancy_color_coded.png"), 
+                       cv2.cvtColor(color_vis, cv2.COLOR_RGB2BGR))
+    
+    def _order_points(self, pts):
+        """Order points in clockwise order starting from top-left"""
+        # Sort by x-coordinate
+        x_sorted = pts[np.argsort(pts[:, 0]), :]
+        
+        # Get left-most and right-most points
+        left_most = x_sorted[:2, :]
+        right_most = x_sorted[2:, :]
+        
+        # Sort left-most by y-coordinate (top-left, bottom-left)
+        left_most = left_most[np.argsort(left_most[:, 1]), :]
+        tl, bl = left_most[0], left_most[1]
+        
+        # Sort right-most by y-coordinate (top-right, bottom-right)
+        right_most = right_most[np.argsort(right_most[:, 1]), :]
+        tr, br = right_most[0], right_most[1]
+        
+        return np.array([tl, tr, br, bl], dtype=np.float32)
+    
+    def _remove_duplicate_rectangles(self, rectangles, distance_threshold=50):
+        """Remove duplicate rectangles based on center distance"""
+        if len(rectangles) == 0:
+            return rectangles
+        
+        filtered = []
+        for rect in rectangles:
+            center = np.mean(rect, axis=0)
+            is_duplicate = False
+            
+            for existing in filtered:
+                existing_center = np.mean(existing, axis=0)
+                dist = np.linalg.norm(center - existing_center)
+                if dist < distance_threshold:
+                    is_duplicate = True
+                    break
+            
+            if not is_duplicate:
+                filtered.append(rect)
+        
+        return filtered
+    
     def detect_parking_spots(self):
-        """Step 2: Detect empty parking spots using Traditional CV"""
+        """Step 2: Detect empty parking spots using Traditional CV with occupancy detection
+        Uses comprehensive Hough line-based approach from test4.py"""
         if self.original_image is None:
             messagebox.showwarning("Warning", "Please load an image first!")
             return
         
         try:
-            self.update_status("Detecting parking spots (Traditional CV)...")
+            self.update_status("Detecting parking spots (Traditional CV - Hough Line Method)...")
             
             # Create output folder for process images
             output_folder = "cv_process_images"
@@ -379,139 +586,302 @@ class ParkingGridConverter:
             # Step 1: Save original image
             cv2.imwrite(os.path.join(output_folder, "1_original.png"), self.original_image)
             
+            # Preprocessing
             gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-            blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+            blurred = cv2.GaussianBlur(gray, (3, 3), 0)  # Smaller blur to preserve edges
             
             # Step 2: Save grayscale and blurred
             cv2.imwrite(os.path.join(output_folder, "2_grayscale.png"), gray)
             cv2.imwrite(os.path.join(output_folder, "3_blurred.png"), blurred)
             
-            # Edge detection
+            # Step 4: Canny edge detection
             edges = cv2.Canny(blurred, 50, 150)
-            
-            # Step 3: Save edge detection
             cv2.imwrite(os.path.join(output_folder, "4_edges_canny.png"), edges)
             
-            # Morphological operations
-            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-            closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel, iterations=1)
+            # Step 5: Hough Line Transform to detect line segments
+            lines = cv2.HoughLinesP(edges, rho=1, theta=np.pi/180, threshold=50,
+                                    minLineLength=40, maxLineGap=15)
             
-            # Step 4: Save morphological closed
-            cv2.imwrite(os.path.join(output_folder, "5_morphology_closed.png"), closed)
+            # Draw all Hough lines for visualization
+            hough_vis = image.copy()
+            if lines is not None:
+                for line in lines:
+                    x1, y1, x2, y2 = line[0]
+                    cv2.line(hough_vis, (x1, y1), (x2, y2), (255, 255, 0), 2)
+            cv2.imwrite(os.path.join(output_folder, "5_hough_lines.png"), 
+                       cv2.cvtColor(hough_vis, cv2.COLOR_RGB2BGR))
             
-            dilated = cv2.dilate(closed, kernel, iterations=1)
+            # Step 6: Separate horizontal and vertical lines
+            h_lines = []  # Horizontal lines
+            v_lines = []  # Vertical lines
             
-            # Step 5: Save dilated
-            cv2.imwrite(os.path.join(output_folder, "6_dilated.png"), dilated)
+            if lines is not None:
+                for line in lines:
+                    x1, y1, x2, y2 = line[0]
+                    angle = np.abs(np.arctan2(y2-y1, x2-x1) * 180 / np.pi)
+                    
+                    # Classify line orientation
+                    if angle < 20 or angle > 160:  # Horizontal (±20 degrees)
+                        h_lines.append((x1, y1, x2, y2))
+                    elif 70 < angle < 110:  # Vertical (90±20 degrees)
+                        v_lines.append((x1, y1, x2, y2))
             
-            # Step 5b: Save binary dilated image (thresholded to pure black/white)
-            _, binary_dilated = cv2.threshold(dilated, 127, 255, cv2.THRESH_BINARY)
-            cv2.imwrite(os.path.join(output_folder, "6b_binary_dilated.png"), binary_dilated)
+            # Step 6: Draw classified lines (H and V in different colors)
+            colored_lines = np.zeros((gray.shape[0], gray.shape[1], 3), dtype=np.uint8)
+            for x1, y1, x2, y2 in h_lines:
+                cv2.line(colored_lines, (x1, y1), (x2, y2), (255, 0, 0), 2)  # Blue for H
+            for x1, y1, x2, y2 in v_lines:
+                cv2.line(colored_lines, (x1, y1), (x2, y2), (0, 255, 0), 2)  # Green for V
+            cv2.imwrite(os.path.join(output_folder, "6_classified_lines_HV.png"), 
+                       cv2.cvtColor(colored_lines, cv2.COLOR_RGB2BGR))
             
-            contours, _ = cv2.findContours(dilated, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+            # Step 7: Draw all detected lines
+            lines_image = np.zeros_like(gray)
+            for x1, y1, x2, y2 in h_lines:
+                cv2.line(lines_image, (x1, y1), (x2, y2), 255, 2)
+            for x1, y1, x2, y2 in v_lines:
+                cv2.line(lines_image, (x1, y1), (x2, y2), 255, 2)
+            cv2.imwrite(os.path.join(output_folder, "7_all_detected_lines.png"), lines_image)
             
-            # Step 6: Save all contours detected
-            contour_image = image.copy()
-            cv2.drawContours(contour_image, contours, -1, (0, 255, 0), 2)
-            cv2.imwrite(os.path.join(output_folder, "7_all_contours.png"), cv2.cvtColor(contour_image, cv2.COLOR_RGB2BGR))
+            # Step 8: Close gaps in lines (morphological closing)
+            # Close horizontal gaps in horizontal lines
+            kernel_h = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 1))
+            # Close vertical gaps in vertical lines  
+            kernel_v = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 15))
             
-            # Parking spot detection parameters
-            parking_spot_rects = []
-            min_spot_area = 2000
-            max_spot_area = 20000
-            min_aspect_ratio = 1.5
-            max_aspect_ratio = 7.0
-            max_solidity = 0.75
+            closed = cv2.morphologyEx(lines_image, cv2.MORPH_CLOSE, kernel_h)
+            closed = cv2.morphologyEx(closed, cv2.MORPH_CLOSE, kernel_v)
+            cv2.imwrite(os.path.join(output_folder, "8_lines_closed.png"), closed)
             
-            spot_number = 0  # Counter for sequential numbering
-            for i, contour in enumerate(contours):
-                area = cv2.contourArea(contour)
+            # Step 9: Dilate slightly to ensure connectivity at intersections
+            kernel_dilate = np.ones((3, 3), np.uint8)
+            thickened = cv2.dilate(closed, kernel_dilate, iterations=1)
+            cv2.imwrite(os.path.join(output_folder, "9_lines_thickened.png"), thickened)
+            
+            # Step 10: Invert to get parking space regions
+            inverted = cv2.bitwise_not(thickened)
+            cv2.imwrite(os.path.join(output_folder, "10_inverted_regions.png"), inverted)
+            
+            # Step 11: Use connected components to find separate regions
+            num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(inverted, connectivity=8)
+            
+            parking_regions = np.zeros_like(gray)
+            valid_regions = []
+            
+            # Parking spot detection parameters 
+            contour_min_area = 1500
+            contour_max_area = 25000
+            min_aspect_ratio = 0.1
+            max_aspect_ratio = 0.8
+            
+            # # Step 12: Show all regions with different colors (for debugging)
+            # colored_labels = np.zeros((inverted.shape[0], inverted.shape[1], 3), dtype=np.uint8)
+            # for i in range(1, num_labels):
+            #     mask = labels == i
+            #     color = ((i * 50) % 255, (i * 80) % 255, (i * 110) % 255)
+            #     colored_labels[mask] = color
+            # cv2.imwrite(os.path.join(output_folder, "12_all_regions_colored.png"), 
+            #            cv2.cvtColor(colored_labels, cv2.COLOR_RGB2BGR))
+            
+            for i in range(1, num_labels):
+                area = stats[i, cv2.CC_STAT_AREA]
+                w_region = stats[i, cv2.CC_STAT_WIDTH]
+                h_region = stats[i, cv2.CC_STAT_HEIGHT]
+                aspect = h_region / w_region if w_region > 0 else 0
                 
-                if area < min_spot_area or area > max_spot_area:
+                # Check if this could be a parking space
+                if contour_min_area <= area <= contour_max_area:
+                    if min_aspect_ratio <= aspect <= max_aspect_ratio:
+                        valid_regions.append(i)
+                        parking_regions[labels == i] = 255
+            
+            # Step 13: Save valid parking regions
+            cv2.imwrite(os.path.join(output_folder, "13_valid_parking_regions.png"), parking_regions)
+            
+            # Step 14: Find contours in the filtered parking regions
+            contours, _ = cv2.findContours(parking_regions, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            contours_vis = image.copy()
+            cv2.drawContours(contours_vis, contours, -1, (0, 255, 0), 2)
+            cv2.imwrite(os.path.join(output_folder, "14_detected_contours.png"), 
+                       cv2.cvtColor(contours_vis, cv2.COLOR_RGB2BGR))
+            
+            # Step 15: Filter rectangles by shape (rectangularity)
+            rectangles = []
+            rejected_rectangularity = []
+            min_rectangularity = 0.80  # From test4.py
+            
+            for contour in contours:
+                area = cv2.contourArea(contour)
+                if area < 1500:  # Skip very small contours
                     continue
                 
-                x, y, w, h = cv2.boundingRect(contour)
+                # Get minimum area rectangle for better fit
+                rect = cv2.minAreaRect(contour)
+                box = cv2.boxPoints(rect)
+                ordered = self._order_points(box)
+                
+                # Calculate rectangularity (how well contour fits a rectangle)
+                rect_area = cv2.contourArea(ordered)
+                if rect_area > 0:
+                    rectangularity = area / rect_area
+                else:
+                    rectangularity = 0
+                
+                # Only keep nearly perfect rectangles
+                if rectangularity >= min_rectangularity:
+                    rectangles.append(ordered)
+                else:
+                    rejected_rectangularity.append((ordered, rectangularity))
+            
+            # Save rectangles filtered by shape
+            rect_vis = image.copy()
+            for rect in rectangles:
+                pts = rect.astype(np.int32)
+                cv2.polylines(rect_vis, [pts], True, (0, 255, 255), 2)
+            # Also show rejected in red
+            for rect, _ in rejected_rectangularity:
+                pts = rect.astype(np.int32)
+                cv2.polylines(rect_vis, [pts], True, (0, 0, 255), 1)
+            cv2.imwrite(os.path.join(output_folder, "15_rectangles_filtered_by_shape.png"), 
+                       cv2.cvtColor(rect_vis, cv2.COLOR_RGB2BGR))
+            
+            # Step 16: Remove duplicate rectangles based on center proximity
+            filtered = self._remove_duplicate_rectangles(rectangles, distance_threshold=50)
+            
+            # Save final parking spaces
+            rect_final_vis = image.copy()
+            for i, rect in enumerate(filtered):
+                pts = rect.astype(np.int32)
+                cv2.polylines(rect_final_vis, [pts], True, (0, 255, 0), 2)
+                center = np.mean(rect, axis=0).astype(int)
+                cv2.putText(rect_final_vis, str(i), tuple(center), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            cv2.imwrite(os.path.join(output_folder, "16_parking_spaces_final.png"), 
+                       cv2.cvtColor(rect_final_vis, cv2.COLOR_RGB2BGR))
+            
+            # Convert filtered rectangles to parking spot format
+            parking_spot_rects = []
+            spot_number = 0
+            
+            for rect in filtered:
+                spot_number += 1
+                area = cv2.contourArea(rect)
+                x, y, w, h = cv2.boundingRect(rect.astype(np.int32))
                 aspect_ratio = float(max(w, h)) / min(w, h) if min(w, h) > 0 else 0
                 
-                if aspect_ratio < min_aspect_ratio or aspect_ratio > max_aspect_ratio:
-                    continue
-                
-                hull = cv2.convexHull(contour)
-                hull_area = cv2.contourArea(hull)
-                solidity = area / hull_area if hull_area > 0 else 0
-                
-                peri = cv2.arcLength(contour, True)
-                approx = cv2.approxPolyDP(contour, 0.02 * peri, True)
-                is_rectangular = 4 <= len(approx) <= 6
-                
-                min_rect = cv2.minAreaRect(contour)
+                min_rect = cv2.minAreaRect(rect.astype(np.int32))
                 box_points = cv2.boxPoints(min_rect)
                 box_points = np.int64(box_points)
                 
-                if is_rectangular or solidity < max_solidity:
-                    spot_number += 1  # Increment spot number
-                    rect_info = {
-                        'spot_id': spot_number,  # Sequential ID from 1 to N
-                        'bounding_rect': {'x': x, 'y': y, 'width': w, 'height': h},
-                        'min_area_rect': {
-                            'center': min_rect[0],
-                            'size': min_rect[1],
-                            'angle': min_rect[2],
-                            'corner_points': box_points.tolist()
-                        },
-                        'area': area,
-                        'aspect_ratio': aspect_ratio,
-                        'solidity': solidity,
-                        'is_rectangular': is_rectangular,
-                        'contour': contour
-                    }
-                    parking_spot_rects.append(rect_info)
+                rect_info = {
+                    'spot_id': spot_number,
+                    'bounding_rect': {'x': x, 'y': y, 'width': w, 'height': h},
+                    'min_area_rect': {
+                        'center': min_rect[0],
+                        'size': min_rect[1],
+                        'angle': min_rect[2],
+                        'corner_points': box_points.tolist()
+                    },
+                    'area': area,
+                    'aspect_ratio': aspect_ratio,
+                    'solidity': 0.0,
+                    'is_rectangular': True,
+                    'contour': rect.astype(np.int32),
+                    'is_occupied': False,
+                    'occupancy_confidence': 0.0
+                }
+                parking_spot_rects.append(rect_info)
             
             # Store parking spots
             self.parking_spots = parking_spot_rects
             
-            # Draw parking spots on image (GREEN for empty spots)
+            # Detect occupancy using multi-feature approach from test4.py
+            if parking_spot_rects:
+                self.update_status("Detecting occupancy of parking spots...")
+                self.detect_occupancy(image, gray, parking_spot_rects, occupancy_threshold=0.15, 
+                                    output_folder=output_folder, save_steps=True)
+            
+            # Separate empty and occupied spots
+            empty_spots = [s for s in parking_spot_rects if not s.get('is_occupied', False)]
+            occupied_spots = [s for s in parking_spot_rects if s.get('is_occupied', False)]
+            
+            # Draw parking spots on image (GREEN for empty, RED for occupied)
             result_image = image.copy()
+            occupancy_vis = image.copy()
+            
             for rect in parking_spot_rects:
                 x = rect['bounding_rect']['x']
                 y = rect['bounding_rect']['y']
                 w = rect['bounding_rect']['width']
                 h = rect['bounding_rect']['height']
+                is_occupied = rect.get('is_occupied', False)
+                confidence = rect.get('occupancy_confidence', 0.0)
                 
-                # Draw bounding rectangle (green for parking spots)
-                cv2.rectangle(result_image, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                # Choose color based on occupancy
+                if is_occupied:
+                    color = (255, 0, 0)  # Red for occupied
+                    status_text = "OCC"
+                else:
+                    color = (0, 255, 0)  # Green for empty
+                    status_text = "EMP"
                 
-                # Draw min area rectangle (lighter green)
+                # Draw bounding rectangle
+                cv2.rectangle(result_image, (x, y), (x + w, y + h), color, 2)
+                
+                # Draw min area rectangle
                 box = np.array(rect['min_area_rect']['corner_points'], dtype=np.int32)
-                cv2.polylines(result_image, [box], True, (100, 255, 100), 2)
+                cv2.polylines(result_image, [box], True, color, 2)
                 
-                # Label with spot number (1 to N)
+                # Label with spot number and status
                 cx, cy = map(int, rect['min_area_rect']['center'])
-                cv2.putText(result_image, f"P{rect['spot_id']}", (cx-10, cy), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 200, 0), 1, cv2.LINE_AA)
+                cv2.putText(result_image, f"P{rect['spot_id']}", (cx-15, cy-5), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1, cv2.LINE_AA)
+                cv2.putText(result_image, status_text, (cx-15, cy+10), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1, cv2.LINE_AA)
+                
+                # For occupancy visualization, also show confidence
+                cv2.polylines(occupancy_vis, [box], True, color, 2)
+                cv2.putText(occupancy_vis, f'{confidence:.3f}', 
+                           (cx - 25, cy),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
             
             self.processed_image = result_image
             self.display_image(self.processed_image, self.image_canvas)
             
-            # Step 7: Save final result with detected parking spots
-            cv2.imwrite(os.path.join(output_folder, "8_detected_parking_spots.png"), 
+            # Step 17: Save final result with detected parking spots
+            cv2.imwrite(os.path.join(output_folder, "17_detected_parking_spots.png"), 
                        cv2.cvtColor(result_image, cv2.COLOR_RGB2BGR))
             
-            self.update_status(f"Detected {len(parking_spot_rects)} empty parking spots (images saved to {output_folder}/)")
+            # Step 18: Save occupancy analysis
+            cv2.imwrite(os.path.join(output_folder, "18_occupancy_analysis.png"), 
+                       cv2.cvtColor(occupancy_vis, cv2.COLOR_RGB2BGR))
+            
+            self.update_status(f"Detected {len(empty_spots)} empty, {len(occupied_spots)} occupied parking spots (images saved to {output_folder}/)")
             
             info_text = f"Parking Spot Detection (Traditional CV):\n"
-            info_text += f"Empty parking spots found: {len(parking_spot_rects)}\n\n"
+            info_text += f"Total parking spots found: {len(parking_spot_rects)}\n"
+            info_text += f"  🟢 Empty spots: {len(empty_spots)}\n"
+            info_text += f"  🔴 Occupied spots: {len(occupied_spots)}\n\n"
             info_text += "Process images saved to: cv_process_images/\n"
             info_text += "  1. Original → 2. Grayscale → 3. Blurred\n"
-            info_text += "  4. Edges → 5. Closed → 6. Dilated\n"
-            info_text += "  7. All Contours → 8. Final Result\n\n"
+            info_text += "  4. Canny Edges → 5. Hough Lines\n"
+            info_text += "  6. Classified Lines (HV) → 7. All Detected Lines\n"
+            info_text += "  8. Lines Closed → 9. Lines Thickened\n"
+            info_text += "  10. Inverted Regions → 12. All Regions Colored\n"
+            info_text += "  13. Valid Parking Regions → 14. Detected Contours\n"
+            info_text += "  15. Rectangles Filtered → 16. Parking Spaces Final\n"
+            info_text += "  17. Detected Parking Spots → 18. Occupancy Analysis\n"
+            info_text += "  19. Occupancy Edges → 20. Occupancy Variance\n"
+            info_text += "  21. Occupancy Bright Pixels → 22. Occupancy Dark Pixels\n"
+            info_text += "  23. Occupancy Combined Score → 24. Occupancy Color Coded\n"
+            info_text += "  (Note: Step 11 processes connected components, no image saved)\n\n"
             
-            if parking_spot_rects:
-                info_text += "Detected spots:\n"
-                for rect in parking_spot_rects[:10]:  # Show first 10
-                    info_text += f"  P{rect['spot_id']}: x={rect['bounding_rect']['x']}, y={rect['bounding_rect']['y']}, {rect['bounding_rect']['width']}x{rect['bounding_rect']['height']}px, Area={rect['area']:.0f}\n"
-                if len(parking_spot_rects) > 10:
-                    info_text += f"  ... and {len(parking_spot_rects)-10} more\n"
+            if empty_spots:
+                info_text += "Empty spots (first 10):\n"
+                for rect in empty_spots[:10]:
+                    info_text += f"  P{rect['spot_id']}: x={rect['bounding_rect']['x']}, y={rect['bounding_rect']['y']}, {rect['bounding_rect']['width']}x{rect['bounding_rect']['height']}px\n"
+                if len(empty_spots) > 10:
+                    info_text += f"  ... and {len(empty_spots)-10} more empty spots\n"
             
             info_text += "\nNext: Detect Obstacles (YOLO)"
             self.update_info(info_text)
@@ -575,26 +945,37 @@ class ParkingGridConverter:
             image = cv2.cvtColor(self.original_image, cv2.COLOR_BGR2RGB)
             result_image = image.copy()
             
-            # First draw parking spots (GREEN) if they exist
+            # First draw parking spots (GREEN for empty, RED for occupied) if they exist
             if self.parking_spots:
                 for rect in self.parking_spots:
                     x = rect['bounding_rect']['x']
                     y = rect['bounding_rect']['y']
                     w = rect['bounding_rect']['width']
                     h = rect['bounding_rect']['height']
+                    is_occupied = rect.get('is_occupied', False)
                     
-                    # Green fill with transparency effect
+                    # Choose color based on occupancy
+                    if is_occupied:
+                        color = (255, 0, 0)  # Red for occupied
+                        status_text = "OCC"
+                    else:
+                        color = (0, 255, 0)  # Green for empty
+                        status_text = "EMP"
+                    
+                    # Fill with transparency effect
                     overlay = result_image.copy()
-                    cv2.rectangle(overlay, (x, y), (x + w, y + h), (0, 255, 0), -1)
+                    cv2.rectangle(overlay, (x, y), (x + w, y + h), color, -1)
                     cv2.addWeighted(overlay, 0.3, result_image, 0.7, 0, result_image)
                     
-                    # Green border
-                    cv2.rectangle(result_image, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                    # Border
+                    cv2.rectangle(result_image, (x, y), (x + w, y + h), color, 2)
                     
-                    # Label with spot number (1 to N)
+                    # Label with spot number and status
                     cx, cy = map(int, rect['min_area_rect']['center'])
-                    cv2.putText(result_image, f"P{rect['spot_id']}", (cx-10, cy), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 200, 0), 1, cv2.LINE_AA)
+                    cv2.putText(result_image, f"P{rect['spot_id']}", (cx-10, cy-5), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1, cv2.LINE_AA)
+                    cv2.putText(result_image, status_text, (cx-10, cy+10), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1, cv2.LINE_AA)
             
             # Then draw YOLO obstacles (RED) on top
             obstacle_count = 0
@@ -623,22 +1004,28 @@ class ParkingGridConverter:
             
             # Add legend to image
             legend_y = 30
-            cv2.rectangle(result_image, (5, 5), (200, 70), (255, 255, 255), -1)
-            cv2.rectangle(result_image, (5, 5), (200, 70), (0, 0, 0), 1)
+            cv2.rectangle(result_image, (5, 5), (220, 100), (255, 255, 255), -1)
+            cv2.rectangle(result_image, (5, 5), (220, 100), (0, 0, 0), 1)
             cv2.rectangle(result_image, (10, 15), (25, 30), (0, 255, 0), -1)
             cv2.putText(result_image, "Empty Parking Spot", (30, 27), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 1)
             cv2.rectangle(result_image, (10, 40), (25, 55), (255, 0, 0), -1)
-            cv2.putText(result_image, "Obstacle (YOLO)", (30, 52), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 1)
+            cv2.putText(result_image, "Occupied Spot", (30, 52), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 1)
+            cv2.rectangle(result_image, (10, 65), (25, 80), (255, 0, 0), -1)
+            cv2.putText(result_image, "Obstacle (YOLO)", (30, 77), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 1)
             
             self.processed_image = result_image
             self.display_image(self.processed_image, self.image_canvas)
             
-            parking_count = len(self.parking_spots) if self.parking_spots else 0
-            self.update_status(f"YOLO: {obstacle_count} obstacles | Parking: {parking_count} spots")
+            empty_count = len([s for s in self.parking_spots if not s.get('is_occupied', False)]) if self.parking_spots else 0
+            occupied_count = len([s for s in self.parking_spots if s.get('is_occupied', False)]) if self.parking_spots else 0
+            total_parking = len(self.parking_spots) if self.parking_spots else 0
+            
+            self.update_status(f"YOLO: {obstacle_count} obstacles | Parking: {empty_count} empty, {occupied_count} occupied")
             
             info_text = f"Combined Detection Results:\n"
             info_text += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            info_text += f"🟢 Empty Parking Spots: {parking_count}\n"
+            info_text += f"🟢 Empty Parking Spots: {empty_count}\n"
+            info_text += f"🔴 Occupied Parking Spots: {occupied_count}\n"
             info_text += f"🔴 Obstacles (YOLO): {obstacle_count}\n\n"
             
             obstacle_summary = {}
@@ -700,8 +1087,13 @@ class ParkingGridConverter:
             self.update_status("Generating grid from detections...")
             
             # Step 1: Mark empty parking spots (value 2) from Traditional CV
+            # Only mark spots that are NOT occupied
             if self.parking_spots:
                 for rect in self.parking_spots:
+                    # Skip occupied spots - they should be treated as obstacles
+                    if rect.get('is_occupied', False):
+                        continue
+                    
                     x = rect['bounding_rect']['x']
                     y = rect['bounding_rect']['y']
                     w = rect['bounding_rect']['width']
@@ -731,6 +1123,43 @@ class ParkingGridConverter:
                                 cell_area = cell_width * cell_height
                                 if overlap_area > cell_area * 0.2:
                                     self.grid_matrix[row, col] = 2  # Empty parking spot
+            
+            # Step 1b: Mark occupied parking spots as obstacles (value 1)
+            if self.parking_spots:
+                for rect in self.parking_spots:
+                    # Only mark occupied spots as obstacles
+                    if not rect.get('is_occupied', False):
+                        continue
+                    
+                    x = rect['bounding_rect']['x']
+                    y = rect['bounding_rect']['y']
+                    w = rect['bounding_rect']['width']
+                    h = rect['bounding_rect']['height']
+                    
+                    # Find grid cells covered by this occupied parking spot
+                    start_col = max(0, x // cell_width)
+                    end_col = min(self.grid_cols - 1, (x + w) // cell_width)
+                    start_row = max(0, y // cell_height)
+                    end_row = min(self.grid_rows - 1, (y + h) // cell_height)
+                    
+                    for row in range(start_row, end_row + 1):
+                        for col in range(start_col, end_col + 1):
+                            # Calculate overlap
+                            cell_x1 = col * cell_width
+                            cell_y1 = row * cell_height
+                            cell_x2 = cell_x1 + cell_width
+                            cell_y2 = cell_y1 + cell_height
+                            
+                            overlap_x1 = max(x, cell_x1)
+                            overlap_y1 = max(y, cell_y1)
+                            overlap_x2 = min(x + w, cell_x2)
+                            overlap_y2 = min(y + h, cell_y2)
+                            
+                            if overlap_x2 > overlap_x1 and overlap_y2 > overlap_y1:
+                                overlap_area = (overlap_x2 - overlap_x1) * (overlap_y2 - overlap_y1)
+                                cell_area = cell_width * cell_height
+                                if overlap_area > cell_area * 0.2:
+                                    self.grid_matrix[row, col] = 1  # Occupied parking spot = obstacle
             
             # Step 2: Mark obstacles (value 1) from YOLO - overwrites parking spots if overlapping
             if self.detected_objects:
@@ -813,7 +1242,7 @@ class ParkingGridConverter:
             self.visualize_grid_matrix()
             
             # Save grid image
-            self.save_grid_image(self.grid_matrix, "9_grid_matrix.png")
+            self.save_grid_image(self.grid_matrix, "25_grid_matrix.png")
             
             # Statistics
             total_cells = self.grid_rows * self.grid_cols
@@ -1137,7 +1566,7 @@ class ParkingGridConverter:
                 self.inflated_grid = self.inflate_obstacles(working_grid, self.clearance_radius)
                 self.update_status(f"Inflating obstacles with clearance: {self.clearance_radius}")
                 # Save inflated grid image with parking spots
-                self.save_inflated_grid_image(self.inflated_grid, self.grid_matrix, "10_inflated_grid.png")
+                self.save_inflated_grid_image(self.inflated_grid, self.grid_matrix, "26_inflated_grid.png")
             else:
                 self.inflated_grid = working_grid
             
@@ -1159,9 +1588,9 @@ class ParkingGridConverter:
                     self.smoothed_path = None
                 
                 # Save path images
-                self.save_path_image(path, "11_astar_path.png")
+                self.save_path_image(path, "27_astar_path.png")
                 if self.smoothed_path is not None:
-                    self.save_path_image(self.smoothed_path, "12_smoothed_path.png", is_smoothed=True)
+                    self.save_path_image(self.smoothed_path, "28_smoothed_path.png", is_smoothed=True)
                 
                 self.redraw_with_points()
                 self.visualize_grid_with_path()
@@ -1266,7 +1695,7 @@ class ParkingGridConverter:
         
         return None
     
-    def smooth_path_bspline(self, path, smoothing_factor=0.1, num_points=100):
+    def smooth_path_bspline(self, path, smoothing_factor=0.05, num_points=150):
         """Smooth the path using B-spline interpolation"""
         if len(path) < 3:
             return np.array(path)
