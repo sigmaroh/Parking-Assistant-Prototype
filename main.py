@@ -11,6 +11,7 @@ from math import sqrt
 from scipy.interpolate import UnivariateSpline
 
 import scipy.ndimage as ndimage
+from mpc_controller import Environment
 
 
 class ParkingGridConverter:
@@ -53,6 +54,17 @@ class ParkingGridConverter:
         self.car_heading = 0  # Car heading angle in degrees
         self.simulation_window = None  # Fullscreen simulation window
         self.simulation_canvas = None  # Canvas in fullscreen window
+        
+        # MPC Controller state
+        self.mpc_env = None  # MPC Environment for rendering
+        self.car_x = 0.0  # Car x position (grid units)
+        self.car_y = 0.0  # Car y position (grid units)
+        self.car_psi = 0.0  # Car heading angle (radians)
+        self.car_delta = 0.0  # Steering angle (radians)
+        self.car_velocity = 2.0  # Car velocity (grid units per step)
+        self.car_wheelbase = 2.5  # Wheelbase for bicycle model
+        self.lookahead_distance = 3.0  # Pure pursuit lookahead
+        self.max_steering_angle = np.radians(35)  # Max steering angle
         
         # Create UI first (needed for status updates)
         self.create_widgets()
@@ -274,7 +286,7 @@ class ParkingGridConverter:
             try:
                 self.root.after(0, lambda: self.update_status("Loading YOLO model (downloading if first time)..."))
                 from ultralytics import YOLO
-                model_path = 'yolov8x-seg.pt'
+                model_path = 'yolov8x.pt'
                 if not os.path.exists(model_path):
                     # Download the model if not present (will be automatic by yolo, but explicit for clarity)
                     self.yolo_model = YOLO('yolov8x-seg.pt')  # this will download if not already present
@@ -1557,14 +1569,27 @@ class ParkingGridConverter:
             return
         
         try:
-            self.clearance_radius = int(self.clearance_spinbox.get())
+            # Calculate clearance based on half of car's pixel width in grid cells
+            car_width_cells = self.get_car_width_in_cells()
+            half_car_width = car_width_cells / 2.0
+            
+            # Use the calculated value, but allow manual override from spinbox
+            spinbox_value = int(self.clearance_spinbox.get())
+            if spinbox_value > 0:
+                # If user specified a value, use it
+                self.clearance_radius = spinbox_value
+            else:
+                # Auto-calculate based on half car width
+                self.clearance_radius = max(1, int(np.ceil(half_car_width)))
+            
+            self.update_status(f"Car width: {car_width_cells:.1f} cells, using clearance: {self.clearance_radius} cells (half width: {half_car_width:.1f})")
             
             # Create working grid (treat parking spots as navigable for pathfinding)
             working_grid = np.where(self.grid_matrix == 2, 0, self.grid_matrix)
             
             if self.clearance_radius > 0:
                 self.inflated_grid = self.inflate_obstacles(working_grid, self.clearance_radius)
-                self.update_status(f"Inflating obstacles with clearance: {self.clearance_radius}")
+                self.update_status(f"Inflating obstacles with clearance: {self.clearance_radius} cells (half car width)")
                 # Save inflated grid image with parking spots
                 self.save_inflated_grid_image(self.inflated_grid, self.grid_matrix, "26_inflated_grid.png")
             else:
@@ -1601,8 +1626,8 @@ class ParkingGridConverter:
                 info_text += f"End: {self.end_point}\n"
                 info_text += f"Path nodes: {len(path)}\n"
                 info_text += f"Path distance: {path_length:.2f} units\n"
-                if self.clearance_radius > 0:
-                    info_text += f"Clearance: {self.clearance_radius} cells\n"
+                info_text += f"Car width: {car_width_cells:.1f} cells\n"
+                info_text += f"Clearance: {self.clearance_radius} cells (½ width)\n"
                 if self.smoothed_path is not None:
                     info_text += f"Smoothing: B-spline (100 points)\n"
                 info_text += f"Movement: 8-directional (diagonal)\n\n"
@@ -1623,6 +1648,29 @@ class ParkingGridConverter:
             messagebox.showerror("Error", f"Error running A*: {str(e)}")
             import traceback
             traceback.print_exc()
+    
+    def get_car_width_in_cells(self):
+        """Calculate the car's width in grid cells based on parking spot dimensions"""
+        if self.processed_image is None:
+            return 2  # Default fallback
+        
+        height, width = self.processed_image.shape[:2]
+        cell_width = width // self.grid_cols
+        cell_height = height // self.grid_rows
+        
+        # Calculate car pixel width based on parking spot sizes
+        if self.parking_spots and len(self.parking_spots) > 0:
+            avg_spot_width = sum(s['bounding_rect']['width'] for s in self.parking_spots) / len(self.parking_spots)
+            avg_spot_height = sum(s['bounding_rect']['height'] for s in self.parking_spots) / len(self.parking_spots)
+            spot_min = min(avg_spot_width, avg_spot_height)
+            car_width_pixels = int(spot_min * 0.75)
+        else:
+            car_width_pixels = max(18, cell_width)
+        
+        # Convert pixel width to grid cells
+        car_width_cells = car_width_pixels / cell_width
+        
+        return car_width_cells
     
     def inflate_obstacles(self, grid, clearance):
         """Inflate obstacles in the grid by a given clearance"""
@@ -1785,7 +1833,7 @@ class ParkingGridConverter:
         self.update_status("Path cleared")
     
     def start_simulation(self):
-        """Start car simulation along the smoothed path in fullscreen window"""
+        """Start car simulation along the smoothed path using MPC controller"""
         if self.path is None:
             messagebox.showwarning("Warning", "Please run A* pathfinding first!")
             return
@@ -1803,11 +1851,28 @@ class ParkingGridConverter:
         self.simulation_running = True
         self.simulation_index = 0
         
-        # Calculate initial heading
+        # Initialize MPC car state from start position
+        start_pos = self.simulation_path[0]
+        self.car_x = float(start_pos[1])  # col -> x
+        self.car_y = float(start_pos[0])  # row -> y
+        
+        # Calculate initial heading towards second waypoint
         if len(self.simulation_path) > 1:
-            dx = self.simulation_path[1][1] - self.simulation_path[0][1]
-            dy = self.simulation_path[1][0] - self.simulation_path[0][0]
-            self.car_heading = np.degrees(np.arctan2(dx, -dy))
+            next_pos = self.simulation_path[1]
+            dx = next_pos[1] - start_pos[1]
+            dy = next_pos[0] - start_pos[0]
+            self.car_psi = np.arctan2(dy, dx)  # heading in radians
+            self.car_heading = np.degrees(self.car_psi)
+        
+        self.car_delta = 0.0  # Initial steering angle
+        
+        # Initialize MPC Environment with obstacles from grid
+        obstacles = self.get_grid_obstacles()
+        self.mpc_env = Environment(obstacles)
+        
+        # Draw the reference path on the MPC environment
+        path_for_mpc = [(p[1], p[0]) for p in self.simulation_path]  # (x, y) format
+        self.mpc_env.draw_path(path_for_mpc)
         
         # Create fullscreen simulation window
         self.create_simulation_window()
@@ -1815,8 +1880,69 @@ class ParkingGridConverter:
         # Update button states
         self.sim_start_btn.config(state=tk.DISABLED)
         
-        self.update_status("Simulation started (fullscreen)...")
-        self.animate_car()
+        self.update_status("MPC Simulation started (fullscreen)...")
+        self.animate_car_mpc()
+    
+    def get_grid_obstacles(self):
+        """Extract obstacles from grid matrix for MPC environment"""
+        obstacles = []
+        if self.inflated_grid is not None:
+            grid = self.inflated_grid
+        elif self.grid_matrix is not None:
+            grid = self.grid_matrix
+        else:
+            return np.array(obstacles)
+        
+        # Find all obstacle cells (value = 1)
+        for row in range(grid.shape[0]):
+            for col in range(grid.shape[1]):
+                if grid[row, col] == 1:
+                    obstacles.append([col, row])  # (x, y) format
+        
+        return np.array(obstacles) if obstacles else np.array([[0, 0]])
+    
+    def pure_pursuit_steering(self, lookahead_idx):
+        """Calculate steering angle using Pure Pursuit algorithm"""
+        if lookahead_idx >= len(self.simulation_path):
+            return 0.0
+        
+        # Get lookahead point
+        target = self.simulation_path[lookahead_idx]
+        target_x = target[1]  # col -> x
+        target_y = target[0]  # row -> y
+        
+        # Transform to vehicle coordinates
+        dx = target_x - self.car_x
+        dy = target_y - self.car_y
+        
+        # Rotate to car's local frame
+        local_x = dx * np.cos(-self.car_psi) - dy * np.sin(-self.car_psi)
+        local_y = dx * np.sin(-self.car_psi) + dy * np.cos(-self.car_psi)
+        
+        # Calculate curvature
+        L_d = np.sqrt(local_x**2 + local_y**2)
+        if L_d < 0.01:
+            return 0.0
+        
+        # Pure pursuit steering angle
+        curvature = 2 * local_y / (L_d ** 2)
+        steering = np.arctan(self.car_wheelbase * curvature)
+        
+        # Clamp steering angle
+        steering = np.clip(steering, -self.max_steering_angle, self.max_steering_angle)
+        
+        return steering
+    
+    def update_car_kinematics(self, dt=0.1):
+        """Update car position using bicycle kinematic model"""
+        # Bicycle model equations
+        self.car_x += self.car_velocity * np.cos(self.car_psi) * dt
+        self.car_y += self.car_velocity * np.sin(self.car_psi) * dt
+        self.car_psi += (self.car_velocity / self.car_wheelbase) * np.tan(self.car_delta) * dt
+        
+        # Normalize heading
+        self.car_psi = np.arctan2(np.sin(self.car_psi), np.cos(self.car_psi))
+        self.car_heading = np.degrees(self.car_psi)
     
     def create_simulation_window(self):
         """Create a fullscreen window for simulation"""
@@ -1924,8 +2050,77 @@ class ParkingGridConverter:
         if self.path:
             self.redraw_with_points()
     
+    def animate_car_mpc(self):
+        """Animate the car using MPC controller with bicycle model kinematics"""
+        if not self.simulation_running:
+            return
+        
+        # Check if reached destination
+        end_pos = self.simulation_path[-1]
+        dist_to_goal = np.sqrt((self.car_x - end_pos[1])**2 + (self.car_y - end_pos[0])**2)
+        
+        if dist_to_goal < 1.5:
+            # Simulation complete
+            self.simulation_running = False
+            self.sim_start_btn.config(state=tk.NORMAL)
+            
+            self.update_status("MPC Simulation complete! Press X to close window.")
+            self.update_info(
+                f"MPC Simulation Complete!\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"Controller: MPC with Pure Pursuit\n"
+                f"Path type: smoothed\n"
+                f"Total waypoints: {len(self.simulation_path)}\n"
+                f"Start: {self.start_point}\n"
+                f"End: {self.end_point}\n"
+                f"Final heading: {self.car_heading:.1f}°\n\n"
+                f"The car successfully navigated\n"
+                f"using bicycle kinematic model!"
+            )
+            return
+        
+        # Find closest point on path
+        min_dist = float('inf')
+        closest_idx = 0
+        for i, p in enumerate(self.simulation_path):
+            d = np.sqrt((self.car_x - p[1])**2 + (self.car_y - p[0])**2)
+            if d < min_dist:
+                min_dist = d
+                closest_idx = i
+        
+        # Find lookahead point
+        lookahead_idx = closest_idx
+        accumulated_dist = 0.0
+        while lookahead_idx < len(self.simulation_path) - 1 and accumulated_dist < self.lookahead_distance:
+            p1 = self.simulation_path[lookahead_idx]
+            p2 = self.simulation_path[lookahead_idx + 1]
+            accumulated_dist += np.sqrt((p2[1] - p1[1])**2 + (p2[0] - p1[0])**2)
+            lookahead_idx += 1
+        
+        # Calculate steering angle using pure pursuit
+        self.car_delta = self.pure_pursuit_steering(lookahead_idx)
+        
+        # Update car kinematics
+        speed = int(self.sim_speed_spinbox.get())
+        self.car_velocity = 0.3 + speed * 0.03  # Scale velocity with speed setting
+        self.update_car_kinematics(dt=0.15)
+        
+        # Draw the scene with car at MPC position
+        current_pos = (self.car_y, self.car_x)  # (row, col) format
+        self.draw_scene_with_car_mpc(current_pos)
+        
+        # Calculate delay based on speed setting
+        delay = max(10, 150 - speed * 1.5)
+        
+        # Update progress
+        progress = (closest_idx / len(self.simulation_path)) * 100
+        self.update_status(f"MPC Simulating... {progress:.1f}% | Steering: {np.degrees(self.car_delta):.1f}°")
+        
+        # Schedule next frame
+        self.root.after(int(delay), self.animate_car_mpc)
+    
     def animate_car(self):
-        """Animate the car along the path"""
+        """Animate the car along the path (legacy method)"""
         if not self.simulation_running:
             return
         
@@ -2095,6 +2290,183 @@ class ParkingGridConverter:
         #            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
         # cv2.putText(img, f"Heading: {self.car_heading:.1f} deg", (15, 115),
         #            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        
+        # Display on fullscreen simulation canvas if available, otherwise main canvas
+        if self.simulation_canvas is not None:
+            self.display_image(img, self.simulation_canvas)
+        else:
+            self.display_image(img, self.image_canvas)
+    
+    def draw_scene_with_car_mpc(self, car_pos):
+        """Draw the image with car rendered using MPC Environment"""
+        if self.processed_image is None:
+            return
+        
+        img = self.processed_image.copy()
+        height, width = img.shape[:2]
+        cell_width = width // self.grid_cols
+        cell_height = height // self.grid_rows
+        
+        # Draw original path (yellow-orange, dimmed)
+        if self.path:
+            for i in range(len(self.path) - 1):
+                row1, col1 = self.path[i]
+                row2, col2 = self.path[i + 1]
+                
+                center1 = (col1 * cell_width + cell_width // 2,
+                          row1 * cell_height + cell_height // 2)
+                center2 = (col2 * cell_width + cell_width // 2,
+                          row2 * cell_height + cell_height // 2)
+                
+                cv2.line(img, center1, center2, (180, 140, 0), 2)
+        
+        # Draw smoothed path (green)
+        if self.smoothed_path is not None and len(self.smoothed_path) > 1:
+            for i in range(len(self.smoothed_path) - 1):
+                row1, col1 = self.smoothed_path[i]
+                row2, col2 = self.smoothed_path[i + 1]
+                
+                x1 = int(col1 * cell_width + cell_width // 2)
+                y1 = int(row1 * cell_height + cell_height // 2)
+                x2 = int(col2 * cell_width + cell_width // 2)
+                y2 = int(row2 * cell_height + cell_height // 2)
+                
+                cv2.line(img, (x1, y1), (x2, y2), (0, 200, 0), 2)
+        
+        # Draw start point
+        if self.start_point:
+            row, col = self.start_point
+            center_x = col * cell_width + cell_width // 2
+            center_y = row * cell_height + cell_height // 2
+            cv2.circle(img, (center_x, center_y), 15, (0, 255, 255), -1)
+            cv2.putText(img, "S", (center_x - 6, center_y + 5),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
+        
+        # Draw end point
+        if self.end_point:
+            row, col = self.end_point
+            center_x = col * cell_width + cell_width // 2
+            center_y = row * cell_height + cell_height // 2
+            cv2.circle(img, (center_x, center_y), 15, (255, 0, 255), -1)
+            cv2.putText(img, "E", (center_x - 6, center_y + 5),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+        
+        # Draw car using MPC-style rendering with steering wheels
+        car_row, car_col = car_pos
+        car_x_px = int(car_col * cell_width + cell_width // 2)
+        car_y_px = int(car_row * cell_height + cell_height // 2)
+        
+        # Car dimensions
+        if self.parking_spots and len(self.parking_spots) > 0:
+            avg_spot_width = sum(s['bounding_rect']['width'] for s in self.parking_spots) / len(self.parking_spots)
+            avg_spot_height = sum(s['bounding_rect']['height'] for s in self.parking_spots) / len(self.parking_spots)
+            spot_min = min(avg_spot_width, avg_spot_height)
+            spot_max = max(avg_spot_width, avg_spot_height)
+            car_width = int(spot_min * 0.75)
+            car_length = int(spot_max * 0.65)
+        else:
+            car_length = max(30, cell_height * 2)
+            car_width = max(18, cell_width)
+        
+        # MPC-style car rendering with body and wheels
+        # Convert heading from math convention to visual convention
+        # psi = 0 means moving right (+x), but car body has front at +y
+        # So we need to rotate visual by (psi - π/2) to align front with movement
+        psi = self.car_psi  # heading in radians (math convention)
+        visual_psi = psi - np.pi / 2  # visual rotation (front points in movement direction)
+        delta = self.car_delta  # steering angle in radians
+        
+        # Rotation helper
+        def rotate_points(pts, angle, center):
+            cos_a = np.cos(angle)
+            sin_a = np.sin(angle)
+            rotated = []
+            for px, py in pts:
+                rx = center[0] + (px - center[0]) * cos_a - (py - center[1]) * sin_a
+                ry = center[1] + (px - center[0]) * sin_a + (py - center[1]) * cos_a
+                rotated.append((int(rx), int(ry)))
+            return rotated
+        
+        # Car body corners (relative to center, before rotation)
+        # Front is at +y direction in the unrotated state
+        half_len = car_length // 2
+        half_wid = car_width // 2
+        
+        body_corners = [
+            (car_x_px - half_wid, car_y_px - half_len),  # rear left
+            (car_x_px + half_wid, car_y_px - half_len),  # rear right
+            (car_x_px + half_wid, car_y_px + half_len),  # front right
+            (car_x_px - half_wid, car_y_px + half_len),  # front left
+        ]
+        
+        # Rotate car body using visual angle
+        rotated_body = rotate_points(body_corners, visual_psi, (car_x_px, car_y_px))
+        
+        # Draw car body
+        pts = np.array(rotated_body, dtype=np.int32)
+        cv2.fillPoly(img, [pts], (0, 0, 255))  # Red car body
+        cv2.polylines(img, [pts], True, (0, 0, 139), 2)  # Dark red border
+        
+        # Wheel dimensions
+        wheel_length = max(8, car_length // 5)
+        wheel_width = max(4, car_width // 6)
+        
+        # Wheel positions relative to car center (before rotation)
+        wheel_offsets = [
+            (half_wid - wheel_width//2, half_len - wheel_length),   # front right
+            (-half_wid + wheel_width//2, half_len - wheel_length),  # front left
+            (half_wid - wheel_width//2, -half_len + wheel_length),  # rear right
+            (-half_wid + wheel_width//2, -half_len + wheel_length), # rear left
+        ]
+        
+        # Draw wheels
+        for i, (wx, wy) in enumerate(wheel_offsets):
+            # Rotate wheel position around car center using visual angle
+            cos_v = np.cos(visual_psi)
+            sin_v = np.sin(visual_psi)
+            wheel_x = car_x_px + wx * cos_v - wy * sin_v
+            wheel_y = car_y_px + wx * sin_v + wy * cos_v
+            
+            # Wheel corners (before rotation)
+            w_half_len = wheel_length // 2
+            w_half_wid = wheel_width // 2
+            wheel_corners = [
+                (wheel_x - w_half_wid, wheel_y - w_half_len),
+                (wheel_x + w_half_wid, wheel_y - w_half_len),
+                (wheel_x + w_half_wid, wheel_y + w_half_len),
+                (wheel_x - w_half_wid, wheel_y + w_half_len),
+            ]
+            
+            # Front wheels have steering angle added to visual angle
+            if i < 2:  # Front wheels
+                wheel_angle = visual_psi + delta
+            else:  # Rear wheels
+                wheel_angle = visual_psi
+            
+            # Rotate wheel
+            rotated_wheel = rotate_points(wheel_corners, wheel_angle, (wheel_x, wheel_y))
+            wheel_pts = np.array(rotated_wheel, dtype=np.int32)
+            cv2.fillPoly(img, [wheel_pts], (20, 20, 20))  # Dark gray wheels
+        
+        # Draw front indicator (headlights) - at front of car in movement direction
+        front_offset = half_len - 3
+        cos_v = np.cos(visual_psi)
+        sin_v = np.sin(visual_psi)
+        front_x = int(car_x_px - front_offset * sin_v)
+        front_y = int(car_y_px + front_offset * cos_v)
+        cv2.circle(img, (front_x, front_y), 4, (255, 255, 100), -1)  # Yellow headlight
+        
+        # Display MPC info overlay
+        cv2.rectangle(img, (5, 5), (280, 90), (0, 0, 0), -1)
+        cv2.rectangle(img, (5, 5), (280, 90), (255, 255, 255), 1)
+        cv2.putText(img, f"MPC Controller Active", (15, 25),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+        cv2.putText(img, f"Heading: {self.car_heading:.1f} deg", (15, 45),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        cv2.putText(img, f"Steering: {np.degrees(delta):.1f} deg", (15, 65),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        cv2.putText(img, f"Velocity: {self.car_velocity:.2f}", (15, 85),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         
         # Display on fullscreen simulation canvas if available, otherwise main canvas
         if self.simulation_canvas is not None:
