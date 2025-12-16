@@ -45,7 +45,7 @@ class ParkingGridConverter:
         self.path = None
         self.smoothed_path = None
         self.inflated_grid = None
-        self.clearance_radius = 1
+        self.clearance_radius = 0  # Default: half car width + 1px ((40px/2 + 1px) / 10px = 2.1 ≈ 3 cells)
         
         # Simulation
         self.simulation_running = False
@@ -194,11 +194,12 @@ class ParkingGridConverter:
         self.clearance_spinbox = ttk.Spinbox(
             config_frame,
             from_=0,
-            to=5,
+            to=10,
             width=8
         )
-        self.clearance_spinbox.set(1)
+        self.clearance_spinbox.set(self.clearance_radius)
         self.clearance_spinbox.pack(side=tk.LEFT, padx=5)
+       # ttk.Label(config_frame, text="(0=auto)", font=("Arial", 8), foreground="gray").pack(side=tk.LEFT, padx=2)
         
         ttk.Label(config_frame, text="Cell Size (px):").pack(side=tk.LEFT, padx=5)
         self.cell_size_spinbox = ttk.Spinbox(
@@ -1278,6 +1279,9 @@ class ParkingGridConverter:
             
             self.update_info(info_text)
             
+            # Calculate and update clearance value for A* pathfinding
+            self.update_clearance_value()
+            
         except Exception as e:
             messagebox.showerror("Error", f"Error generating grid: {str(e)}")
             import traceback
@@ -1572,27 +1576,37 @@ class ParkingGridConverter:
             return
         
         try:
-            # Calculate clearance based on half of car's pixel width in grid cells
+            # Calculate clearance based on half of car's pixel width + 1px in grid cells
             car_width_cells = self.get_car_width_in_cells()
+            
+            # Get cell width in pixels
+            height, width = self.processed_image.shape[:2]
+            cell_width_px = width // self.grid_cols
+            
+            # Calculate: half car width + 1 pixel, converted to cells
             half_car_width = car_width_cells / 2.0
+            one_pixel_in_cells = 1.0 / cell_width_px
+            half_car_width_plus_1px = half_car_width + one_pixel_in_cells
             
             # Use the calculated value, but allow manual override from spinbox
             spinbox_value = int(self.clearance_spinbox.get())
-            if spinbox_value > 0:
-                # If user specified a value, use it
-                self.clearance_radius = spinbox_value
+            if spinbox_value == 0:
+                # Auto-calculate based on half car width + 1px (default)
+                self.clearance_radius = int(max(1, int(np.ceil(half_car_width_plus_1px))))
+                self.clearance_spinbox.set(self.clearance_radius)
+                self.update_status(f"Car width: {car_width_cells:.1f} cells, auto clearance: {self.clearance_radius} cells (½ width + 1px)")
             else:
-                # Auto-calculate based on half car width
-                self.clearance_radius = max(1, int(np.ceil(half_car_width)))
-            
-            self.update_status(f"Car width: {car_width_cells:.1f} cells, using clearance: {self.clearance_radius} cells (half width: {half_car_width:.1f})")
+                # User specified a manual value, use it
+                self.clearance_radius = int(spinbox_value)
+                auto_value = int(np.ceil(half_car_width_plus_1px))
+                self.update_status(f"Car width: {car_width_cells:.1f} cells, manual clearance: {self.clearance_radius} cells (auto would be: {auto_value})")
             
             # Create working grid (treat parking spots as navigable for pathfinding)
             working_grid = np.where(self.grid_matrix == 2, 0, self.grid_matrix)
             
             if self.clearance_radius > 0:
                 self.inflated_grid = self.inflate_obstacles(working_grid, self.clearance_radius)
-                self.update_status(f"Inflating obstacles with clearance: {self.clearance_radius} cells (half car width)")
+                self.update_status(f"Inflating obstacles with clearance: {self.clearance_radius} cells (½ car width + 1px)")
                 # Save inflated grid image with parking spots
                 self.save_inflated_grid_image(self.inflated_grid, self.grid_matrix, "26_inflated_grid.png")
             else:
@@ -1630,7 +1644,7 @@ class ParkingGridConverter:
                 info_text += f"Path nodes: {len(path)}\n"
                 info_text += f"Path distance: {path_length:.2f} units\n"
                 info_text += f"Car width: {car_width_cells:.1f} cells\n"
-                info_text += f"Clearance: {self.clearance_radius} cells (½ width)\n"
+                info_text += f"Clearance: {self.clearance_radius} cells (½ width + 1px)\n"
                 if self.smoothed_path is not None:
                     info_text += f"Smoothing: B-spline (100 points)\n"
                 info_text += f"Movement: 8-directional (diagonal)\n\n"
@@ -1674,6 +1688,41 @@ class ParkingGridConverter:
         car_width_cells = car_width_pixels / cell_width
         
         return car_width_cells
+    
+    def update_clearance_value(self):
+        """Calculate and update the clearance value based on car width"""
+        if self.processed_image is None or self.grid_matrix is None:
+            return
+        
+        try:
+            # Calculate clearance based on half of car's pixel width + 1px in grid cells
+            car_width_cells = self.get_car_width_in_cells()
+            
+            # Get cell width in pixels
+            height, width = self.processed_image.shape[:2]
+            cell_width_px = width // self.grid_cols
+            
+            # Calculate: half car width + 1 pixel, converted to cells
+            half_car_width = car_width_cells / 2.0
+            one_pixel_in_cells = 1.0 / cell_width_px
+            half_car_width_plus_1px = half_car_width + one_pixel_in_cells
+            
+            # Check if user has set a manual value
+            spinbox_value = int(self.clearance_spinbox.get())
+            if spinbox_value == 0:
+                # Auto-calculate and update spinbox
+                auto_clearance = int(max(1, int(np.ceil(half_car_width_plus_1px))))
+                self.clearance_radius = auto_clearance
+                self.clearance_spinbox.delete(0, tk.END)
+                self.clearance_spinbox.insert(0, str(auto_clearance))
+                self.update_status(f"✓ Auto clearance updated: {auto_clearance} cells (car width: {car_width_cells:.1f} cells, ½ width + 1px)")
+            else:
+                # User has manual value, just update internal variable
+                self.clearance_radius = int(spinbox_value)
+                auto_value = int(np.ceil(half_car_width_plus_1px))
+                self.update_status(f"✓ Using manual clearance: {self.clearance_radius} cells (auto would be: {auto_value} cells)")
+        except Exception as e:
+            print(f"Error updating clearance: {e}")
     
     def inflate_obstacles(self, grid, clearance):
         """Inflate obstacles in the grid by a given clearance"""
