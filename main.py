@@ -11,7 +11,7 @@ from math import sqrt
 from scipy.interpolate import UnivariateSpline
 
 import scipy.ndimage as ndimage
-from mpc_controller import Environment
+from mpc_controller import Environment,MPC_Controller,Linear_MPC_Controller,Car_Dynamics
 
 
 class ParkingGridConverter:
@@ -57,6 +57,8 @@ class ParkingGridConverter:
         
         # MPC Controller state
         self.mpc_env = None  # MPC Environment for rendering
+        self.car_dynamics = None  # Car_Dynamics object from mpc_controller
+        self.mpc_controller = None  # MPC_Controller object
         self.car_x = 0.0  # Car x position (grid units)
         self.car_y = 0.0  # Car y position (grid units)
         self.car_psi = 0.0  # Car heading angle (radians)
@@ -65,6 +67,7 @@ class ParkingGridConverter:
         self.car_wheelbase = 2.5  # Wheelbase for bicycle model
         self.lookahead_distance = 3.0  # Pure pursuit lookahead
         self.max_steering_angle = np.radians(35)  # Max steering angle
+        self.mpc_horizon = 5  # MPC prediction horizon
         
         # Create UI first (needed for status updates)
         self.create_widgets()
@@ -1865,6 +1868,21 @@ class ParkingGridConverter:
             self.car_heading = np.degrees(self.car_psi)
         
         self.car_delta = 0.0  # Initial steering angle
+        self.car_velocity = 1.0  # Initial velocity
+        
+        # Initialize Car_Dynamics from mpc_controller
+        dt = 0.15  # Time step for simulation
+        self.car_dynamics = Car_Dynamics(
+            x_0=self.car_x,
+            y_0=self.car_y,
+            v_0=self.car_velocity,
+            psi_0=self.car_psi,
+            length=self.car_wheelbase,
+            dt=dt
+        )
+        
+        # Initialize MPC Controller
+        self.mpc_controller = Linear_MPC_Controller()  # Use Linear MPC for better performance
         
         # Initialize MPC Environment with obstacles from grid
         obstacles = self.get_grid_obstacles()
@@ -1880,7 +1898,7 @@ class ParkingGridConverter:
         # Update button states
         self.sim_start_btn.config(state=tk.DISABLED)
         
-        self.update_status("MPC Simulation started (fullscreen)...")
+        self.update_status(f"Linear MPC Controller initialized with horizon={self.mpc_horizon}. Starting simulation...")
         self.animate_car_mpc()
     
     def get_grid_obstacles(self):
@@ -2068,14 +2086,16 @@ class ParkingGridConverter:
             self.update_info(
                 f"MPC Simulation Complete!\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"Controller: MPC with Pure Pursuit\n"
+                f"Controller: Linear MPC Controller\n"
                 f"Path type: smoothed\n"
                 f"Total waypoints: {len(self.simulation_path)}\n"
+                f"Horizon: {self.mpc_horizon} steps\n"
                 f"Start: {self.start_point}\n"
                 f"End: {self.end_point}\n"
+                f"Final velocity: {self.car_velocity:.2f} units/s\n"
                 f"Final heading: {self.car_heading:.1f}°\n\n"
                 f"The car successfully navigated\n"
-                f"using bicycle kinematic model!"
+                f"using MPC with bicycle kinematic model!"
             )
             return
         
@@ -2088,22 +2108,40 @@ class ParkingGridConverter:
                 min_dist = d
                 closest_idx = i
         
-        # Find lookahead point
-        lookahead_idx = closest_idx
-        accumulated_dist = 0.0
-        while lookahead_idx < len(self.simulation_path) - 1 and accumulated_dist < self.lookahead_distance:
-            p1 = self.simulation_path[lookahead_idx]
-            p2 = self.simulation_path[lookahead_idx + 1]
-            accumulated_dist += np.sqrt((p2[1] - p1[1])**2 + (p2[0] - p1[0])**2)
-            lookahead_idx += 1
-        
-        # Calculate steering angle using pure pursuit
-        self.car_delta = self.pure_pursuit_steering(lookahead_idx)
-        
-        # Update car kinematics
+        # Get simulation speed setting
         speed = int(self.sim_speed_spinbox.get())
-        self.car_velocity = 0.3 + speed * 0.03  # Scale velocity with speed setting
-        self.update_car_kinematics(dt=0.15)
+        
+        # Get reference points for MPC horizon
+        reference_points = []
+        for i in range(self.mpc_horizon):
+            idx = min(closest_idx + i, len(self.simulation_path) - 1)
+            ref_point = self.simulation_path[idx]
+            reference_points.append([ref_point[1], ref_point[0]])  # (x, y) format
+        
+        reference_points = np.array(reference_points)
+        
+        # Use MPC controller to get optimal control inputs
+        try:
+            acceleration, self.car_delta = self.mpc_controller.optimize(self.car_dynamics, reference_points)
+            
+            # Apply controls and update car state using Car_Dynamics
+            state_dot = self.car_dynamics.move(acceleration, self.car_delta)
+            self.car_dynamics.update_state(state_dot)
+            
+            # Update local variables from Car_Dynamics state
+            self.car_x = self.car_dynamics.x
+            self.car_y = self.car_dynamics.y
+            self.car_velocity = self.car_dynamics.v
+            self.car_psi = self.car_dynamics.psi
+            self.car_heading = np.degrees(self.car_psi)
+            
+        except Exception as e:
+            # Fallback to pure pursuit if MPC fails
+            print(f"MPC optimization failed: {e}, using fallback controller")
+            lookahead_idx = min(closest_idx + 3, len(self.simulation_path) - 1)
+            self.car_delta = self.pure_pursuit_steering(lookahead_idx)
+            self.car_velocity = 0.3 + speed * 0.03
+            self.update_car_kinematics(dt=0.15)
         
         # Draw the scene with car at MPC position
         current_pos = (self.car_y, self.car_x)  # (row, col) format
@@ -2114,7 +2152,7 @@ class ParkingGridConverter:
         
         # Update progress
         progress = (closest_idx / len(self.simulation_path)) * 100
-        self.update_status(f"MPC Simulating... {progress:.1f}% | Steering: {np.degrees(self.car_delta):.1f}°")
+        self.update_status(f"MPC Simulating... {progress:.1f}% | Velocity: {self.car_velocity:.2f} | Steering: {np.degrees(self.car_delta):.1f}°")
         
         # Schedule next frame
         self.root.after(int(delay), self.animate_car_mpc)
