@@ -289,7 +289,7 @@ class ParkingGridConverter:
         def load_model():
             try:
                 self.root.after(0, lambda: self.update_status("Loading YOLO model (downloading if first time)..."))
-                model_path = 'yolo11l.pt'
+                model_path = 'yolov8x-seg.pt'
                 if not os.path.exists(model_path):
                     # Download the model if not present (will be automatic by yolo, but explicit for clarity)
                     self.yolo_model = YOLO('yolov8n.pt')  # this will download if not already present
@@ -376,170 +376,170 @@ class ParkingGridConverter:
         except Exception as e:
             messagebox.showerror("Error", f"Error loading image: {str(e)}")
     
-    def detect_occupancy(self, image, gray, parking_spots, occupancy_threshold=0.10, output_folder="cv_process_images", save_steps=True):
-        """Detect occupancy of parking spots using multi-feature approach from test4.py
+    # def detect_occupancy(self, image, gray, parking_spots, occupancy_threshold=0.10, output_folder="cv_process_images", save_steps=True):
+    #     """Detect occupancy of parking spots using multi-feature approach from test4.py
         
-        Uses multiple features:
-        - Edge density (cars have more edges)
-        - Variance (cars have more texture variation)
-        - Bright pixels (white car roofs)
-        - Dark pixels (car shadows/body)
-        """
-        if save_steps:
-            os.makedirs(output_folder, exist_ok=True)
+    #     Uses multiple features:
+    #     - Edge density (cars have more edges)
+    #     - Variance (cars have more texture variation)
+    #     - Bright pixels (white car roofs)
+    #     - Dark pixels (car shadows/body)
+    #     """
+    #     if save_steps:
+    #         os.makedirs(output_folder, exist_ok=True)
             
-            # Create visualization images for each step
-            edge_vis = np.zeros_like(gray)
-            variance_vis = np.zeros_like(gray)
-            bright_vis = np.zeros_like(gray)
-            dark_vis = np.zeros_like(gray)
-            combined_vis = np.zeros_like(gray)
+    #         # Create visualization images for each step
+    #         edge_vis = np.zeros_like(gray)
+    #         variance_vis = np.zeros_like(gray)
+    #         bright_vis = np.zeros_like(gray)
+    #         dark_vis = np.zeros_like(gray)
+    #         combined_vis = np.zeros_like(gray)
         
-        for spot in parking_spots:
-            # Get parking space bounds
-            x = spot['bounding_rect']['x']
-            y = spot['bounding_rect']['y']
-            w = spot['bounding_rect']['width']
-            h = spot['bounding_rect']['height']
+    #     for spot in parking_spots:
+    #         # Get parking space bounds
+    #         x = spot['bounding_rect']['x']
+    #         y = spot['bounding_rect']['y']
+    #         w = spot['bounding_rect']['width']
+    #         h = spot['bounding_rect']['height']
             
-            # Create mask for this parking space using contour
-            mask = np.zeros(gray.shape[:2], dtype=np.uint8)
-            if 'contour' in spot:
-                cv2.fillPoly(mask, [spot['contour']], 255)
-            else:
-                # Fallback to bounding rectangle
-                cv2.rectangle(mask, (x, y), (x + w, y + h), 255, -1)
+    #         # Create mask for this parking space using contour
+    #         mask = np.zeros(gray.shape[:2], dtype=np.uint8)
+    #         if 'contour' in spot:
+    #             cv2.fillPoly(mask, [spot['contour']], 255)
+    #         else:
+    #             # Fallback to bounding rectangle
+    #             cv2.rectangle(mask, (x, y), (x + w, y + h), 255, -1)
             
-            # Get the ROI
-            roi_gray = gray[y:y+h, x:x+w]
-            roi_mask = mask[y:y+h, x:x+w]
+    #         # Get the ROI
+    #         roi_gray = gray[y:y+h, x:x+w]
+    #         roi_mask = mask[y:y+h, x:x+w]
             
-            if roi_gray.size == 0:
-                spot['is_occupied'] = False
-                spot['occupancy_confidence'] = 0.0
-                continue
+    #         if roi_gray.size == 0:
+    #             spot['is_occupied'] = False
+    #             spot['occupancy_confidence'] = 0.0
+    #             continue
             
-            mask_pixels = np.sum(roi_mask > 0)
-            if mask_pixels == 0:
-                spot['is_occupied'] = False
-                spot['occupancy_confidence'] = 0.0
-                continue
+    #         mask_pixels = np.sum(roi_mask > 0)
+    #         if mask_pixels == 0:
+    #             spot['is_occupied'] = False
+    #             spot['occupancy_confidence'] = 0.0
+    #             continue
             
-            # Method 1: Edge density (cars have more edges, but ignore weak edges from lines)
-            # Use higher thresholds to ignore parking line edges
-            edges = cv2.Canny(roi_gray, 80, 200)
-            edges_masked = cv2.bitwise_and(edges, edges, mask=roi_mask)
-            edge_density = np.sum(edges_masked > 0) / (mask_pixels + 1e-5)
+    #         # Method 1: Edge density (cars have more edges, but ignore weak edges from lines)
+    #         # Use higher thresholds to ignore parking line edges
+    #         edges = cv2.Canny(roi_gray, 80, 200)
+    #         edges_masked = cv2.bitwise_and(edges, edges, mask=roi_mask)
+    #         edge_density = np.sum(edges_masked > 0) / (mask_pixels + 1e-5)
             
-            if save_steps:
-                # Copy edges to visualization (scale for visibility)
-                edge_roi = edge_vis[y:y+h, x:x+w]
-                edge_roi[roi_mask > 0] = edges_masked[roi_mask > 0]
+    #         if save_steps:
+    #             # Copy edges to visualization (scale for visibility)
+    #             edge_roi = edge_vis[y:y+h, x:x+w]
+    #             edge_roi[roi_mask > 0] = edges_masked[roi_mask > 0]
             
-            # Method 2: Variance (cars have more texture variation)
-            roi_masked = cv2.bitwise_and(roi_gray, roi_gray, mask=roi_mask)
-            masked_pixels = roi_masked[roi_mask > 0]
-            if len(masked_pixels) > 0:
-                variance = np.var(masked_pixels)
-                variance_normalized = variance / 2000  # Normalize (reduced sensitivity)
-                # Create variance visualization using Laplacian (measures local variation)
-                laplacian = cv2.Laplacian(roi_gray, cv2.CV_64F)
-                laplacian_abs = np.abs(laplacian)
-                variance_img = np.clip(laplacian_abs * 2, 0, 255).astype(np.uint8)
-            else:
-                variance_normalized = 0
-                variance_img = np.zeros_like(roi_gray)
+    #         # Method 2: Variance (cars have more texture variation)
+    #         roi_masked = cv2.bitwise_and(roi_gray, roi_gray, mask=roi_mask)
+    #         masked_pixels = roi_masked[roi_mask > 0]
+    #         if len(masked_pixels) > 0:
+    #             variance = np.var(masked_pixels)
+    #             variance_normalized = variance / 2000  # Normalize (reduced sensitivity)
+    #             # Create variance visualization using Laplacian (measures local variation)
+    #             laplacian = cv2.Laplacian(roi_gray, cv2.CV_64F)
+    #             laplacian_abs = np.abs(laplacian)
+    #             variance_img = np.clip(laplacian_abs * 2, 0, 255).astype(np.uint8)
+    #         else:
+    #             variance_normalized = 0
+    #             variance_img = np.zeros_like(roi_gray)
             
-            if save_steps:
-                # Copy variance visualization
-                var_roi = variance_vis[y:y+h, x:x+w]
-                var_roi[roi_mask > 0] = variance_img[roi_mask > 0]
+    #         if save_steps:
+    #             # Copy variance visualization
+    #             var_roi = variance_vis[y:y+h, x:x+w]
+    #             var_roi[roi_mask > 0] = variance_img[roi_mask > 0]
             
-            # Method 3: Check for bright pixels (white car roofs) - more conservative
-            bright_threshold = 220  # Higher threshold for bright pixels
-            bright_mask = (roi_gray > bright_threshold) & (roi_mask > 0)
-            bright_pixels = np.sum(bright_mask)
-            bright_ratio = bright_pixels / (mask_pixels + 1e-5)
+    #         # Method 3: Check for bright pixels (white car roofs) - more conservative
+    #         bright_threshold = 220  # Higher threshold for bright pixels
+    #         bright_mask = (roi_gray > bright_threshold) & (roi_mask > 0)
+    #         bright_pixels = np.sum(bright_mask)
+    #         bright_ratio = bright_pixels / (mask_pixels + 1e-5)
             
-            if save_steps:
-                # Create bright pixels visualization
-                bright_roi = bright_vis[y:y+h, x:x+w]
-                bright_roi[bright_mask] = 255
+    #         if save_steps:
+    #             # Create bright pixels visualization
+    #             bright_roi = bright_vis[y:y+h, x:x+w]
+    #             bright_roi[bright_mask] = 255
             
-            # Method 4: Check for dark pixels (car shadows/body)
-            dark_threshold = 50
-            dark_mask = (roi_gray < dark_threshold) & (roi_mask > 0)
-            dark_pixels = np.sum(dark_mask)
-            dark_ratio = dark_pixels / (mask_pixels + 1e-5)
+    #         # Method 4: Check for dark pixels (car shadows/body)
+    #         dark_threshold = 50
+    #         dark_mask = (roi_gray < dark_threshold) & (roi_mask > 0)
+    #         dark_pixels = np.sum(dark_mask)
+    #         dark_ratio = dark_pixels / (mask_pixels + 1e-5)
             
-            if save_steps:
-                # Create dark pixels visualization
-                dark_roi = dark_vis[y:y+h, x:x+w]
-                dark_roi[dark_mask] = 255
+    #         if save_steps:
+    #             # Create dark pixels visualization
+    #             dark_roi = dark_vis[y:y+h, x:x+w]
+    #             dark_roi[dark_mask] = 255
             
-            # Combined score - adjusted weights, less sensitive to edges
-            combined_score = (edge_density * 0.3 + variance_normalized * 0.25 + 
-                             bright_ratio * 0.2 + dark_ratio * 0.25)
+    #         # Combined score - adjusted weights, less sensitive to edges
+    #         combined_score = (edge_density * 0.3 + variance_normalized * 0.25 + 
+    #                          bright_ratio * 0.2 + dark_ratio * 0.25)
             
-            if save_steps:
-                # Create combined visualization (normalize score to 0-255)
-                combined_roi = combined_vis[y:y+h, x:x+w]
-                combined_value = int(np.clip(combined_score * 255 / occupancy_threshold, 0, 255))
-                combined_roi[roi_mask > 0] = combined_value
+    #         if save_steps:
+    #             # Create combined visualization (normalize score to 0-255)
+    #             combined_roi = combined_vis[y:y+h, x:x+w]
+    #             combined_value = int(np.clip(combined_score * 255 / occupancy_threshold, 0, 255))
+    #             combined_roi[roi_mask > 0] = combined_value
             
-            # Determine occupancy
-            spot['is_occupied'] = combined_score > occupancy_threshold
-            spot['occupancy_confidence'] = combined_score
-            spot['occupancy_features'] = {
-                'edge_density': edge_density,
-                'variance_normalized': variance_normalized,
-                'bright_ratio': bright_ratio,
-                'dark_ratio': dark_ratio
-            }
+    #         # Determine occupancy
+    #         spot['is_occupied'] = combined_score > occupancy_threshold
+    #         spot['occupancy_confidence'] = combined_score
+    #         spot['occupancy_features'] = {
+    #             'edge_density': edge_density,
+    #             'variance_normalized': variance_normalized,
+    #             'bright_ratio': bright_ratio,
+    #             'dark_ratio': dark_ratio
+    #         }
         
-        # Save step images
-        if save_steps:
-            # Save edge detection visualization
-            cv2.imwrite(os.path.join(output_folder, "19_occupancy_edges.png"), edge_vis)
+    #     # Save step images
+    #     if save_steps:
+    #         # Save edge detection visualization
+    #         cv2.imwrite(os.path.join(output_folder, "19_occupancy_edges.png"), edge_vis)
             
-            # Save variance visualization
-            cv2.imwrite(os.path.join(output_folder, "20_occupancy_variance.png"), variance_vis)
+    #         # Save variance visualization
+    #         cv2.imwrite(os.path.join(output_folder, "20_occupancy_variance.png"), variance_vis)
             
-            # Save bright pixels visualization
-            cv2.imwrite(os.path.join(output_folder, "21_occupancy_bright_pixels.png"), bright_vis)
+    #         # Save bright pixels visualization
+    #         cv2.imwrite(os.path.join(output_folder, "21_occupancy_bright_pixels.png"), bright_vis)
             
-            # Save dark pixels visualization
-            cv2.imwrite(os.path.join(output_folder, "22_occupancy_dark_pixels.png"), dark_vis)
+    #         # Save dark pixels visualization
+    #         cv2.imwrite(os.path.join(output_folder, "22_occupancy_dark_pixels.png"), dark_vis)
             
-            # Save combined score visualization
-            cv2.imwrite(os.path.join(output_folder, "23_occupancy_combined_score.png"), combined_vis)
+    #         # Save combined score visualization
+    #         cv2.imwrite(os.path.join(output_folder, "23_occupancy_combined_score.png"), combined_vis)
             
-            # Create color-coded visualization showing all features
-            # Use original RGB image as base
-            color_vis = image.copy()
-            for spot in parking_spots:
-                x = spot['bounding_rect']['x']
-                y = spot['bounding_rect']['y']
-                w = spot['bounding_rect']['width']
-                h = spot['bounding_rect']['height']
-                is_occupied = spot.get('is_occupied', False)
-                confidence = spot.get('occupancy_confidence', 0.0)
+    #         # Create color-coded visualization showing all features
+    #         # Use original RGB image as base
+    #         color_vis = image.copy()
+    #         for spot in parking_spots:
+    #             x = spot['bounding_rect']['x']
+    #             y = spot['bounding_rect']['y']
+    #             w = spot['bounding_rect']['width']
+    #             h = spot['bounding_rect']['height']
+    #             is_occupied = spot.get('is_occupied', False)
+    #             confidence = spot.get('occupancy_confidence', 0.0)
                 
-                # Draw bounding box (RGB colors: red for occupied, green for empty)
-                color = (255, 0, 0) if is_occupied else (0, 255, 0)
-                cv2.rectangle(color_vis, (x, y), (x + w, y + h), color, 2)
+    #             # Draw bounding box (RGB colors: red for occupied, green for empty)
+    #             color = (255, 0, 0) if is_occupied else (0, 255, 0)
+    #             cv2.rectangle(color_vis, (x, y), (x + w, y + h), color, 2)
                 
-                # Add text with confidence
-                cx, cy = map(int, spot['min_area_rect']['center'])
-                status = "OCC" if is_occupied else "EMP"
-                cv2.putText(color_vis, f"P{spot['spot_id']}: {status}", (x, y - 5),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-                cv2.putText(color_vis, f"Score: {confidence:.3f}", (x, y + h + 15),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
+    #             # Add text with confidence
+    #             cx, cy = map(int, spot['min_area_rect']['center'])
+    #             status = "OCC" if is_occupied else "EMP"
+    #             cv2.putText(color_vis, f"P{spot['spot_id']}: {status}", (x, y - 5),
+    #                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+    #             cv2.putText(color_vis, f"Score: {confidence:.3f}", (x, y + h + 15),
+    #                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
             
-            # Convert RGB to BGR for saving
-            cv2.imwrite(os.path.join(output_folder, "24_occupancy_color_coded.png"), 
-                       cv2.cvtColor(color_vis, cv2.COLOR_RGB2BGR))
+    #         # Convert RGB to BGR for saving
+    #         cv2.imwrite(os.path.join(output_folder, "24_occupancy_color_coded.png"), 
+    #                    cv2.cvtColor(color_vis, cv2.COLOR_RGB2BGR))
     
     def _order_points(self, pts):
         """Order points in clockwise order starting from top-left"""
@@ -854,11 +854,11 @@ class ParkingGridConverter:
                 cv2.putText(result_image, status_text, (cx-15, cy+10), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1, cv2.LINE_AA)
                 
-                # For occupancy visualization, also show confidence
-                cv2.polylines(occupancy_vis, [box], True, color, 2)
-                cv2.putText(occupancy_vis, f'{confidence:.3f}', 
-                           (cx - 25, cy),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
+                # # For occupancy visualization, also show confidence
+                # cv2.polylines(occupancy_vis, [box], True, color, 2)
+                # cv2.putText(occupancy_vis, f'{confidence:.3f}', 
+                #            (cx - 25, cy),
+                #            cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
             
             self.processed_image = result_image
             self.display_image(self.processed_image, self.image_canvas)
@@ -867,9 +867,9 @@ class ParkingGridConverter:
             cv2.imwrite(os.path.join(output_folder, "17_detected_parking_spots.png"), 
                        cv2.cvtColor(result_image, cv2.COLOR_RGB2BGR))
             
-            # Step 18: Save occupancy analysis
-            cv2.imwrite(os.path.join(output_folder, "18_occupancy_analysis.png"), 
-                       cv2.cvtColor(occupancy_vis, cv2.COLOR_RGB2BGR))
+            # # Step 18: Save occupancy analysis
+            # cv2.imwrite(os.path.join(output_folder, "18_occupancy_analysis.png"), 
+            #            cv2.cvtColor(occupancy_vis, cv2.COLOR_RGB2BGR))
             
             self.update_status(f"Detected {len(empty_spots)} empty, {len(occupied_spots)} occupied parking spots (images saved to {output_folder}/)")
             
@@ -1040,8 +1040,8 @@ class ParkingGridConverter:
                     })
             
             # Remove empty parking spots that overlap with YOLO obstacles
-            if self.parking_spots:
-                self.remove_overlapping_empty_spots()
+            # if self.parking_spots:
+            #     self.remove_overlapping_empty_spots()
             
             # Draw YOLO obstacles first for intermediate image
             image = cv2.cvtColor(self.original_image, cv2.COLOR_BGR2RGB)
@@ -1845,14 +1845,39 @@ class ParkingGridConverter:
                 auto_value = int(np.ceil(half_car_width_plus_1px))
                 self.update_status(f"✓ Using manual clearance: {self.clearance_radius} cells (auto would be: {auto_value} cells)")
         except Exception as e:
-            print(f"Error updating clearance: {e}")
+            error_msg = f"Error updating clearance: {e}"
+            print(error_msg)
+            self.update_status(f"✗ {error_msg}")
     
-    def inflate_obstacles(self, grid, clearance):
-        """Inflate obstacles in the grid by a given clearance"""
-        if clearance == 0:
+    def inflate_obstacles(self, grid: np.ndarray, clearance: int) -> np.ndarray:
+        """
+        Inflate obstacles in the grid by a given clearance radius.
+        
+        Uses binary dilation to expand obstacles, creating a safety buffer
+        around them. This is useful for path planning to ensure the vehicle
+        maintains a safe distance from obstacles.
+        
+        Args:
+            grid: Binary grid where 1 represents obstacles and 0 represents free space
+            clearance: Number of cells to inflate obstacles by (radius)
+        
+        Returns:
+            Inflated grid with the same shape as input, with obstacles expanded
+        """
+        if clearance <= 0:
+            # Return a copy to avoid unintentional modifications to the original
             return grid.copy()
+        
+        # Create a structuring element for 8-connectivity (includes diagonals)
         structure = ndimage.generate_binary_structure(2, 2)
-        inflated_grid = ndimage.binary_dilation(grid, structure=structure, iterations=clearance).astype(np.uint8)
+        
+        # Apply binary dilation to expand obstacles
+        inflated_grid = ndimage.binary_dilation(
+            grid, 
+            structure=structure, 
+            iterations=clearance
+        ).astype(np.uint8)
+        
         return inflated_grid
     
     def astar(self, start, goal):
