@@ -9,7 +9,7 @@ import os
 import threading
 from math import sqrt
 from scipy.interpolate import UnivariateSpline
-
+from ultralytics import YOLO
 import scipy.ndimage as ndimage
 from mpc_controller import Environment,MPC_Controller,Linear_MPC_Controller,Car_Dynamics
 
@@ -289,11 +289,10 @@ class ParkingGridConverter:
         def load_model():
             try:
                 self.root.after(0, lambda: self.update_status("Loading YOLO model (downloading if first time)..."))
-                from ultralytics import YOLO
-                model_path = 'yolov8x.pt'
+                model_path = 'yolo11l.pt'
                 if not os.path.exists(model_path):
                     # Download the model if not present (will be automatic by yolo, but explicit for clarity)
-                    self.yolo_model = YOLO('yolov8x-seg.pt')  # this will download if not already present
+                    self.yolo_model = YOLO('yolov8n.pt')  # this will download if not already present
                 else:
                     self.yolo_model = YOLO(model_path)
                 self.root.after(0, lambda: self.update_status("YOLO model loaded! Ready to detect obstacles."))
@@ -812,10 +811,10 @@ class ParkingGridConverter:
             self.parking_spots = parking_spot_rects
             
             # Detect occupancy using multi-feature approach from test4.py
-            if parking_spot_rects:
-                self.update_status("Detecting occupancy of parking spots...")
-                self.detect_occupancy(image, gray, parking_spot_rects, occupancy_threshold=0.15, 
-                                    output_folder=output_folder, save_steps=True)
+            # if parking_spot_rects:
+            #     self.update_status("Detecting occupancy of parking spots...")
+            #     self.detect_occupancy(image, gray, parking_spot_rects, occupancy_threshold=0.15, 
+            #                         output_folder=output_folder, save_steps=True)
             
             # Separate empty and occupied spots
             empty_spots = [s for s in parking_spot_rects if not s.get('is_occupied', False)]
@@ -907,6 +906,89 @@ class ParkingGridConverter:
             import traceback
             traceback.print_exc()
     
+    def check_overlap(self, bbox1, bbox2, threshold=0.3):
+        """Check if two bounding boxes overlap by more than threshold
+        bbox1, bbox2: [x, y, w, h] or [x1, y1, x2, y2]
+        Returns True if overlap area / min_area > threshold
+        """
+        # Convert to x1, y1, x2, y2 format
+        if len(bbox1) == 4 and 'x' not in str(bbox1):  # assume [x1, y1, x2, y2]
+            x1_1, y1_1, x2_1, y2_1 = bbox1
+        else:  # assume it's a dict with x, y, width, height
+            if isinstance(bbox1, dict):
+                x1_1 = bbox1['x']
+                y1_1 = bbox1['y']
+                x2_1 = x1_1 + bbox1['width']
+                y2_1 = y1_1 + bbox1['height']
+            else:
+                x1_1, y1_1, w1, h1 = bbox1
+                x2_1 = x1_1 + w1
+                y2_1 = y1_1 + h1
+        
+        if isinstance(bbox2, list):
+            if len(bbox2) == 4:
+                x1_2, y1_2, x2_2, y2_2 = bbox2
+        else:
+            x1_2 = bbox2['x']
+            y1_2 = bbox2['y']
+            x2_2 = x1_2 + bbox2['width']
+            y2_2 = y1_2 + bbox2['height']
+        
+        # Calculate intersection
+        x1_i = max(x1_1, x1_2)
+        y1_i = max(y1_1, y1_2)
+        x2_i = min(x2_1, x2_2)
+        y2_i = min(y2_1, y2_2)
+        
+        if x2_i <= x1_i or y2_i <= y1_i:
+            return False  # No overlap
+        
+        # Calculate areas
+        intersection_area = (x2_i - x1_i) * (y2_i - y1_i)
+        area1 = (x2_1 - x1_1) * (y2_1 - y1_1)
+        area2 = (x2_2 - x1_2) * (y2_2 - y1_2)
+        min_area = min(area1, area2)
+        
+        # Check if overlap is significant
+        if min_area > 0:
+            overlap_ratio = intersection_area / min_area
+            return overlap_ratio > threshold
+        return False
+    
+    def remove_overlapping_empty_spots(self):
+        """Remove empty parking spots that overlap with YOLO detected obstacles"""
+        if not self.parking_spots or not self.detected_objects:
+            return
+        
+        initial_count = len([s for s in self.parking_spots if not s.get('is_occupied', False)])
+        filtered_spots = []
+        removed_count = 0
+        
+        for spot in self.parking_spots:
+            # Only check empty spots
+            if spot.get('is_occupied', False):
+                filtered_spots.append(spot)
+                continue
+            
+            spot_bbox = spot['bounding_rect']
+            overlaps_with_obstacle = False
+            
+            # Check overlap with each YOLO obstacle
+            for obj in self.detected_objects:
+                if obj['is_obstacle']:
+                    if self.check_overlap(spot_bbox, obj['bbox'], threshold=0.3):
+                        overlaps_with_obstacle = True
+                        removed_count += 1
+                        break
+            
+            # Keep spot if it doesn't overlap with any obstacle
+            if not overlaps_with_obstacle:
+                filtered_spots.append(spot)
+        
+        self.parking_spots = filtered_spots
+        print(f"Removed {removed_count} empty parking spots that overlapped with YOLO obstacles")
+        print(f"Empty spots: {initial_count} -> {initial_count - removed_count}")
+    
     def detect_obstacles_yolo(self):
         """Step 3: Detect obstacles (cars, people, etc.) using YOLO"""
         if self.original_image is None:
@@ -957,8 +1039,46 @@ class ParkingGridConverter:
                         'is_obstacle': class_id in obstacle_classes
                     })
             
-            # Draw both parking spots (green) and obstacles (red) on the image
+            # Remove empty parking spots that overlap with YOLO obstacles
+            if self.parking_spots:
+                self.remove_overlapping_empty_spots()
+            
+            # Draw YOLO obstacles first for intermediate image
             image = cv2.cvtColor(self.original_image, cv2.COLOR_BGR2RGB)
+            yolo_detection_image = image.copy()
+            
+            obstacle_count = 0
+            for obj in self.detected_objects:
+                if obj['is_obstacle']:
+                    obstacle_count += 1
+                    x1, y1, x2, y2 = obj['bbox']
+                    
+                    # Red fill with transparency effect
+                    overlay = yolo_detection_image.copy()
+                    cv2.rectangle(overlay, (x1, y1), (x2, y2), (255, 0, 0), -1)
+                    cv2.addWeighted(overlay, 0.3, yolo_detection_image, 0.7, 0, yolo_detection_image)
+                    
+                    # Red border
+                    cv2.rectangle(yolo_detection_image, (x1, y1), (x2, y2), (255, 0, 0), 3)
+                    
+                    # Label
+                    label = f"{obj['class_name']} {obj['confidence']:.2f}"
+                    label_size, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)
+                    cv2.rectangle(yolo_detection_image, 
+                                (x1, y1 - label_size[1] - 10),
+                                (x1 + label_size[0], y1),
+                                (255, 0, 0), -1)
+                    cv2.putText(yolo_detection_image, label, (x1, y1 - 5),
+                              cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+            
+            # Save YOLO detection image
+            if not os.path.exists("cv_process_images"):
+                os.makedirs("cv_process_images")
+            yolo_save_path = os.path.join("cv_process_images", "29_yolo_detection.png")
+            cv2.imwrite(yolo_save_path, cv2.cvtColor(yolo_detection_image, cv2.COLOR_RGB2BGR))
+            print(f"Saved YOLO detection image to {yolo_save_path}")
+            
+            # Now create the final combined image with filtered parking spots and obstacles
             result_image = image.copy()
             
             # First draw parking spots (GREEN for empty, RED for occupied) if they exist
@@ -994,10 +1114,8 @@ class ParkingGridConverter:
                                cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1, cv2.LINE_AA)
             
             # Then draw YOLO obstacles (RED) on top
-            obstacle_count = 0
             for obj in self.detected_objects:
                 if obj['is_obstacle']:
-                    obstacle_count += 1
                     x1, y1, x2, y2 = obj['bbox']
                     
                     # Red fill with transparency effect
@@ -1018,7 +1136,7 @@ class ParkingGridConverter:
                     cv2.putText(result_image, label, (x1, y1 - 5),
                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
             
-            # Add legend to image
+            # Add legend to final image
             legend_y = 30
             cv2.rectangle(result_image, (5, 5), (220, 100), (255, 255, 255), -1)
             cv2.rectangle(result_image, (5, 5), (220, 100), (0, 0, 0), 1)
@@ -1028,6 +1146,11 @@ class ParkingGridConverter:
             cv2.putText(result_image, "Occupied Spot", (30, 52), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 1)
             cv2.rectangle(result_image, (10, 65), (25, 80), (255, 0, 0), -1)
             cv2.putText(result_image, "Obstacle (YOLO)", (30, 77), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 1)
+            
+            # Save final combined image with filtered parking spots and obstacles
+            final_save_path = os.path.join("cv_process_images", "30_final_empty_spots_and_obstacles.png")
+            cv2.imwrite(final_save_path, cv2.cvtColor(result_image, cv2.COLOR_RGB2BGR))
+            print(f"Saved final image with empty spots and obstacles to {final_save_path}")
             
             self.processed_image = result_image
             self.display_image(self.processed_image, self.image_canvas)
@@ -1402,7 +1525,7 @@ class ParkingGridConverter:
                     x2, y2 = x1 + scale, y1 + scale
                     
                     if self.grid_matrix[row, col] == 1:
-                        color = (50, 50, 50)  # Dark gray for obstacles
+                        color = (0, 0, 255)  # Red for obstacles
                     elif self.grid_matrix[row, col] == 2:
                         color = (0, 255, 0)  # Green for parking spots
                     else:
@@ -1413,7 +1536,7 @@ class ParkingGridConverter:
             # Draw path
             if is_smoothed:
                 # Smoothed path - draw as continuous line
-                path_color = (0, 255, 0)  # Green for smoothed path (BGR)
+                path_color = (0, 255, 255)  # Yellow for smoothed path (BGR)
                 for i in range(len(path) - 1):
                     row1, col1 = path[i]
                     row2, col2 = path[i + 1]
