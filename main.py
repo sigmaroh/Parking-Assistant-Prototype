@@ -49,6 +49,7 @@ class ParkingPlannerUI:
         self.click_mode = None
         self.inflated_grid = None
         self.clearance_radius = GridConfig.DEFAULT_CLEARANCE_RADIUS
+        self.current_cell_size = UIConfig.GRID_CELL_DISPLAY_SIZE  # Store actual cell size used
         
         # Simulation state
         self.simulation_running = False
@@ -136,9 +137,9 @@ class ParkingPlannerUI:
         
         # Grid configuration
         self.add_spinbox(config_frame, "Grid Rows:", 5, 100, 
-                         UIConfig.DEFAULT_GRID_ROWS, 'rows_spinbox')
+                         UIConfig.DEFAULT_GRID_ROWS, 'rows_spinbox', state='readonly')
         self.add_spinbox(config_frame, "Grid Columns:", 5, 100, 
-                         UIConfig.DEFAULT_GRID_COLS, 'cols_spinbox')
+                         UIConfig.DEFAULT_GRID_COLS, 'cols_spinbox', state='readonly')
         self.add_spinbox(config_frame, "YOLO Confidence:", 0.1, 1.0, 
                          DetectionConfig.DEFAULT_CONFIDENCE, 'confidence_spinbox', 
                          increment=0.05)
@@ -154,10 +155,10 @@ class ParkingPlannerUI:
                          UIConfig.DEFAULT_SIM_SPEED, 'sim_speed_spinbox')
     
     def add_spinbox(self, parent, label: str, from_: float, to: float, 
-                     default: float, attr_name: str, increment: float = 1):
+                     default: float, attr_name: str, increment: float = 1, state: str = 'normal'):
         """Helper to add a labeled spinbox."""
         ttk.Label(parent, text=label).pack(side=tk.LEFT, padx=5)
-        spinbox = ttk.Spinbox(parent, from_=from_, to=to, width=8, increment=increment)
+        spinbox = ttk.Spinbox(parent, from_=from_, to=to, width=8, increment=increment, state=state)
         spinbox.set(default)
         spinbox.pack(side=tk.LEFT, padx=5)
         setattr(self, attr_name, spinbox)
@@ -304,6 +305,12 @@ class ParkingPlannerUI:
             expected_cols = width // cell_size
             expected_rows = height // cell_size
             
+            # Update spinboxes with calculated grid dimensions
+            self.rows_spinbox.delete(0, tk.END)
+            self.rows_spinbox.insert(0, str(expected_rows))
+            self.cols_spinbox.delete(0, tk.END)
+            self.cols_spinbox.insert(0, str(expected_cols))
+            
             self.update_status(f"Loaded image: {os.path.basename(file_path)}")
             self.update_info(
                 f"Image Size: {width}x{height} pixels\n"
@@ -439,6 +446,7 @@ class ParkingPlannerUI:
     # ========== Grid Generation ==========
     
     def generate_grid(self):
+        self.clear_path()
         """Generate navigable grid matrix."""
         if self.original_image is None:
             messagebox.showwarning("Warning", "Please load an image first!")
@@ -447,6 +455,9 @@ class ParkingPlannerUI:
         try:
             height, width = self.original_image.shape[:2]
             cell_size = int(self.cell_size_spinbox.get())
+            
+            # Store the cell size for consistent display
+            self.current_cell_size = cell_size
             
             self.update_status("Generating grid from detections...")
             
@@ -1096,12 +1107,44 @@ class ParkingPlannerUI:
     def visualize_grid_matrix(self, grid: np.ndarray):
         """Visualize grid matrix in the grid canvas."""
         self.grid_canvas.delete("all")
-        cell_size = UIConfig.GRID_CELL_DISPLAY_SIZE
+        
+        if UIConfig.FIT_GRID_TO_CANVAS:
+            # MODE 1: Fit grid to canvas (no scrollbars)
+            canvas_width = self.grid_canvas.winfo_width()
+            canvas_height = self.grid_canvas.winfo_height()
+            
+            # Use default size if canvas not yet rendered
+            if canvas_width <= 1:
+                canvas_width = 400
+            if canvas_height <= 1:
+                canvas_height = 600
+            
+            # Calculate cell size to fit the grid in the canvas with some padding
+            padding = 10
+            available_width = canvas_width - padding * 2
+            available_height = canvas_height - padding * 2
+            
+            cell_size_by_width = available_width / self.grid_generator.grid_cols
+            cell_size_by_height = available_height / self.grid_generator.grid_rows
+            cell_size = max(1, int(min(cell_size_by_width, cell_size_by_height)))
+            
+            # Calculate total grid size
+            grid_width = self.grid_generator.grid_cols * cell_size
+            grid_height = self.grid_generator.grid_rows * cell_size
+            
+            # Calculate offsets to center the grid
+            offset_x = (canvas_width - grid_width) // 2
+            offset_y = (canvas_height - grid_height) // 2
+        else:
+            # MODE 2: Show actual grid size (with scrollbars)
+            cell_size = self.current_cell_size
+            offset_x = 0
+            offset_y = 0
         
         for row in range(self.grid_generator.grid_rows):
             for col in range(self.grid_generator.grid_cols):
-                x1 = col * cell_size
-                y1 = row * cell_size
+                x1 = offset_x + col * cell_size
+                y1 = offset_y + row * cell_size
                 x2 = x1 + cell_size
                 y2 = y1 + cell_size
                 
@@ -1118,23 +1161,57 @@ class ParkingPlannerUI:
                     x1, y1, x2, y2, fill=color, outline="#cccccc"
                 )
         
-        self.grid_canvas.configure(
-            scrollregion=(0, 0, 
-                         self.grid_generator.grid_cols * cell_size,
-                         self.grid_generator.grid_rows * cell_size)
-        )
+        # Configure scroll region if not fitting to canvas
+        if not UIConfig.FIT_GRID_TO_CANVAS:
+            self.grid_canvas.configure(
+                scrollregion=(0, 0, 
+                             self.grid_generator.grid_cols * cell_size,
+                             self.grid_generator.grid_rows * cell_size)
+            )
     
     def visualize_grid_with_path(self, grid: np.ndarray, path: List[Tuple[int, int]]):
         """Visualize grid with path highlighted."""
         self.grid_canvas.delete("all")
-        cell_size = UIConfig.GRID_CELL_DISPLAY_SIZE
+        
+        if UIConfig.FIT_GRID_TO_CANVAS:
+            # MODE 1: Fit grid to canvas (no scrollbars)
+            canvas_width = self.grid_canvas.winfo_width()
+            canvas_height = self.grid_canvas.winfo_height()
+            
+            # Use default size if canvas not yet rendered
+            if canvas_width <= 1:
+                canvas_width = 400
+            if canvas_height <= 1:
+                canvas_height = 600
+            
+            # Calculate cell size to fit the grid in the canvas with some padding
+            padding = 10
+            available_width = canvas_width - padding * 2
+            available_height = canvas_height - padding * 2
+            
+            cell_size_by_width = available_width / self.grid_generator.grid_cols
+            cell_size_by_height = available_height / self.grid_generator.grid_rows
+            cell_size = max(1, int(min(cell_size_by_width, cell_size_by_height)))
+            
+            # Calculate total grid size
+            grid_width = self.grid_generator.grid_cols * cell_size
+            grid_height = self.grid_generator.grid_rows * cell_size
+            
+            # Calculate offsets to center the grid
+            offset_x = (canvas_width - grid_width) // 2
+            offset_y = (canvas_height - grid_height) // 2
+        else:
+            # MODE 2: Show actual grid size (with scrollbars)
+            cell_size = self.current_cell_size
+            offset_x = 0
+            offset_y = 0
         
         path_cells = set(path)
         
         for row in range(self.grid_generator.grid_rows):
             for col in range(self.grid_generator.grid_cols):
-                x1 = col * cell_size
-                y1 = row * cell_size
+                x1 = offset_x + col * cell_size
+                y1 = offset_y + row * cell_size
                 x2 = x1 + cell_size
                 y2 = y1 + cell_size
                 
@@ -1155,11 +1232,13 @@ class ParkingPlannerUI:
                     x1, y1, x2, y2, fill=color, outline="#cccccc"
                 )
         
-        self.grid_canvas.configure(
-            scrollregion=(0, 0,
-                         self.grid_generator.grid_cols * cell_size,
-                         self.grid_generator.grid_rows * cell_size)
-        )
+        # Configure scroll region if not fitting to canvas
+        if not UIConfig.FIT_GRID_TO_CANVAS:
+            self.grid_canvas.configure(
+                scrollregion=(0, 0,
+                             self.grid_generator.grid_cols * cell_size,
+                             self.grid_generator.grid_rows * cell_size)
+            )
     
     def display_image(self, img: np.ndarray, canvas: tk.Canvas):
         """Display image on canvas with proper scaling."""

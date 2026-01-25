@@ -13,6 +13,11 @@ class UIConfig:
     DEFAULT_CELL_SIZE = 10
     DEFAULT_SIM_SPEED = 30
     GRID_CELL_DISPLAY_SIZE = 10
+    
+    # Grid display mode
+    # True = Fit grid to canvas (resized, no scrollbars)
+    # False = Show actual grid size (with scrollbars if needed)
+    FIT_GRID_TO_CANVAS = True
 
 @dataclass
 class DetectionConfig:
