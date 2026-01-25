@@ -3,8 +3,9 @@ import numpy as np
 import heapq
 from math import sqrt
 from scipy.interpolate import UnivariateSpline, splprep, splev
-
 import matplotlib.pyplot as plt
+import scipy.ndimage as ndimage
+import matplotlib.cm as cm  # for colormap
 
 def create_node(position: Tuple[int, int], g: float = float('inf'), 
                 h: float = 0.0, parent: Dict = None) -> Dict:
@@ -260,7 +261,7 @@ def visualize_path(grid: np.ndarray,original_path:List[Tuple[int, int]], path: L
     plt.show()
 
 
-import scipy.ndimage as ndimage
+
 
 def inflate_obstacles(grid: np.ndarray, clearance: int = 1) -> np.ndarray:
     """
@@ -278,8 +279,7 @@ def inflate_obstacles(grid: np.ndarray, clearance: int = 1) -> np.ndarray:
     return inflated_grid
 
 
-import matplotlib.pyplot as plt
-import matplotlib.cm as cm  # for colormap
+
 
 def plot_multiple_smoothing_factors(grid: np.ndarray, path: List[Tuple[int, int]], factors: List[float]):
     """
