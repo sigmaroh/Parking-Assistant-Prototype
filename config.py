@@ -1,6 +1,5 @@
 """Configuration constants for the Parking Assistant application."""
 
-import numpy as np
 from dataclasses import dataclass
 
 @dataclass
@@ -17,21 +16,21 @@ class UIConfig:
     # Grid display mode
     # True = Fit grid to canvas (resized, no scrollbars)
     # False = Show actual grid size (with scrollbars if needed)
-    FIT_GRID_TO_CANVAS = True
+    FIT_GRID_TO_CANVAS = False
 
 @dataclass
 class DetectionConfig:
     """Object detection configuration."""
-    YOLO_MODEL_PATH = 'yolov8s_fold_0.pt'
+    YOLO_MODEL_PATH = 'yolo11l.pt'
     YOLO_FALLBACK_MODEL = 'yolov8n.pt'
     DEFAULT_CONFIDENCE = 0.30
     
     # Parking spot detection parameters
     CONTOUR_MIN_AREA = 2500
     CONTOUR_MAX_AREA = 25000
-    MIN_ASPECT_RATIO = 0.1
-    MAX_ASPECT_RATIO = 0.75
-    MIN_RECTANGULARITY = 0.75
+    MIN_ASPECT_RATIO = 0.2
+    MAX_ASPECT_RATIO = 0.7
+    MIN_RECTANGULARITY = 0.80
     DUPLICATE_DISTANCE_THRESHOLD = 50
     
     # COCO classes considered as obstacles
@@ -60,7 +59,7 @@ class GridConfig:
 class PathPlanningConfig:
     """Path planning configuration."""
     SMOOTHING_FACTOR = 0.01
-    NUM_SMOOTHING_POINTS = 100
+    NUM_SMOOTHING_POINTS = 150
     
     # A* movement directions (8-directional)
     MOVEMENT_DIRECTIONS = [

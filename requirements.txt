@@ -1,22 +1,17 @@
-# Parking Lot Path Planner - Python Dependencies
+# Parking Assistance Prototype - Python Dependencies
 # Install with: pip install -r requirements.txt
 
 # Image Processing & Computer Vision
 opencv-python>=4.8.0
 numpy>=1.24.0
 pillow>=10.0.0
-
 # Deep Learning - Object Detection
 ultralytics>=8.0.0
 torch>=2.0.0
-
 # Scientific Computing - Path Smoothing
 scipy>=1.11.0
 
-# GUI (included in Python standard library)
-# tkinter - no pip install needed
-
-# Optional: For diagram generation
+# For diagram generation
 matplotlib>=3.7.0
 
 
