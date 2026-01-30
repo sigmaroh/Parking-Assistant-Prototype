@@ -1,5 +1,6 @@
 """Configuration constants for the Parking Assistant application."""
 
+import numpy as np
 from dataclasses import dataclass
 
 @dataclass

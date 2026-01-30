@@ -541,7 +541,7 @@ class ParkingGridConverter:
     #         cv2.imwrite(os.path.join(output_folder, "24_occupancy_color_coded.png"), 
     #                    cv2.cvtColor(color_vis, cv2.COLOR_RGB2BGR))
     
-    def _order_points(self, pts):
+    def order_points(self, pts):
         """Order points in clockwise order starting from top-left"""
         # Sort by x-coordinate
         x_sorted = pts[np.argsort(pts[:, 0]), :]
@@ -560,7 +560,7 @@ class ParkingGridConverter:
         
         return np.array([tl, tr, br, bl], dtype=np.float32)
     
-    def _remove_duplicate_rectangles(self, rectangles, distance_threshold=50):
+    def remove_duplicate_rectangles(self, rectangles, distance_threshold=50):
         """Remove duplicate rectangles based on center distance"""
         if len(rectangles) == 0:
             return rectangles
@@ -723,7 +723,7 @@ class ParkingGridConverter:
             # Step 15: Filter rectangles by shape (rectangularity)
             rectangles = []
             rejected_rectangularity = []
-            min_rectangularity = 0.80  # From test4.py
+            min_rectangularity = 0.80  # From
             
             for contour in contours:
                 area = cv2.contourArea(contour)
@@ -733,7 +733,7 @@ class ParkingGridConverter:
                 # Get minimum area rectangle for better fit
                 rect = cv2.minAreaRect(contour)
                 box = cv2.boxPoints(rect)
-                ordered = self._order_points(box)
+                ordered = self.order_points(box)
                 
                 # Calculate rectangularity (how well contour fits a rectangle)
                 rect_area = cv2.contourArea(ordered)
@@ -761,7 +761,7 @@ class ParkingGridConverter:
                        cv2.cvtColor(rect_vis, cv2.COLOR_RGB2BGR))
             
             # Step 16: Remove duplicate rectangles based on center proximity
-            filtered = self._remove_duplicate_rectangles(rectangles, distance_threshold=50)
+            filtered = self.remove_duplicate_rectangles(rectangles, distance_threshold=50)
             
             # Save final parking spaces
             rect_final_vis = image.copy()
